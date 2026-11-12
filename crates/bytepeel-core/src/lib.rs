@@ -16,11 +16,13 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod compress;
 mod der;
 mod detect;
 mod dump;
 mod error;
 mod json;
+mod jwt;
 mod node;
 mod path;
 mod protobuf;

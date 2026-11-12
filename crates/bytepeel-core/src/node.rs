@@ -36,6 +36,16 @@ pub enum Codec {
     Pem {
         label: String,
     },
+    /// A JSON Web Token; `kind` is `jws` (3 parts) or `jwe` (5 parts).
+    Jwt {
+        kind: &'static str,
+    },
+    /// gzip; `name` is the original file name from the header, if any.
+    Gzip {
+        name: Option<String>,
+    },
+    Zlib,
+    Zstd,
     Protobuf,
     Der,
     Utf8,
@@ -49,6 +59,10 @@ impl Codec {
             Codec::Dump { .. } => "dump",
             Codec::Base64 { .. } => "base64",
             Codec::Pem { .. } => "pem",
+            Codec::Jwt { .. } => "jwt",
+            Codec::Gzip { .. } => "gzip",
+            Codec::Zlib => "zlib",
+            Codec::Zstd => "zstd",
             Codec::Protobuf => "protobuf",
             Codec::Der => "der",
             Codec::Utf8 => "utf8",
@@ -75,6 +89,13 @@ pub enum Detail {
     Message { fields: Vec<Field> },
     /// DER-encoded ASN.1: one or more top-level elements.
     Der { items: Vec<Asn1> },
+    /// A JWT: one base64 layer node per dot-separated part, plus the
+    /// top-level time claims of a JWS payload (`exp`, `nbf`, `iat`), in that
+    /// order, as `(claim, ISO-8601 UTC)`.
+    Parts {
+        parts: Vec<Node>,
+        times: Vec<(&'static str, String)>,
+    },
     /// Printable UTF-8 text.
     Text { text: String },
     /// Opaque bytes (nothing more specific was found, or the format is not yet supported).

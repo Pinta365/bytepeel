@@ -25,6 +25,59 @@ fn b64(data: &[u8]) -> String {
     o
 }
 
+/// URL-safe base64, unpadded (JWT segments).
+fn b64url(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut o = String::new();
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        o.push(A[((n >> 18) & 63) as usize] as char);
+        o.push(A[((n >> 12) & 63) as usize] as char);
+        if c.len() > 1 {
+            o.push(A[((n >> 6) & 63) as usize] as char);
+        }
+        if c.len() > 2 {
+            o.push(A[(n & 63) as usize] as char);
+        }
+    }
+    o
+}
+
+fn jws(header: &str, payload: &str, sig: &[u8]) -> String {
+    format!(
+        "{}.{}.{}",
+        b64url(header.as_bytes()),
+        b64url(payload.as_bytes()),
+        b64url(sig)
+    )
+}
+
+fn hs256_token(payload: &str) -> String {
+    jws(r#"{"alg":"HS256","typ":"JWT"}"#, payload, &[0x11; 32])
+}
+
+fn none_token(payload: &str) -> String {
+    jws(r#"{"alg":"none"}"#, payload, b"")
+}
+
+fn jwe_token() -> String {
+    format!(
+        "{}..{}.{}.{}",
+        b64url(br#"{"alg":"dir","enc":"A256GCM"}"#),
+        b64url(b"iviv"),
+        b64url(b"ciphertext"),
+        b64url(b"tagtag")
+    )
+}
+
+fn parts_of(n: &Node) -> (&[Node], &[(&'static str, String)]) {
+    match &n.detail {
+        Detail::Parts { parts, times } => (parts, times),
+        d => panic!("not a JWT: {d:?}"),
+    }
+}
+
 fn auto(input: &[u8]) -> Node {
     peel(input, &Options::default()).unwrap()
 }
@@ -316,10 +369,28 @@ fn pem_with_der_payload() {
 
 #[test]
 fn magic_formats_are_not_misread_as_protobuf() {
-    for hex in ["1f8b0800000000000000", "28b52ffd0000", "789c0300"] {
+    // Truncated compressed streams: corrupt when the decoder is compiled in,
+    // unsupported otherwise. Either way, never protobuf.
+    let deflate = if cfg!(feature = "deflate") {
+        "CORRUPT_DATA"
+    } else {
+        "UNSUPPORTED_FORMAT"
+    };
+    let zstd = if cfg!(feature = "zstd") {
+        "CORRUPT_DATA"
+    } else {
+        "UNSUPPORTED_FORMAT"
+    };
+    for (hex, code) in [
+        ("1f8b0800000000000000", deflate),
+        ("28b52ffd0000", zstd),
+        ("789c0300", deflate),
+        ("89504e470d0a1a0a0000", "UNSUPPORTED_FORMAT"),
+        ("504b0304140000000000", "UNSUPPORTED_FORMAT"),
+    ] {
         let n = auto(&h(hex));
         assert_eq!(n.codec, Codec::Bytes, "{hex}");
-        assert_eq!(n.warnings[0].code, "UNSUPPORTED_FORMAT", "{hex}");
+        assert_eq!(n.warnings[0].code, code, "{hex}");
     }
 }
 
@@ -512,6 +583,180 @@ fn malformed_dump_errors_when_forced_as_hex() {
     assert_eq!(peel(b"0a03666f6f", &opts).unwrap().codec, Codec::Hex);
 }
 
+// ------------------------------------------------------------ JWT
+
+#[test]
+fn jwt_hs256() {
+    let payload = r#"{"sub":"1234567890","name":"John Doe","iat":1516239022}"#;
+    let token = hs256_token(payload);
+    let n = auto(token.as_bytes());
+    assert_eq!(n.codec, Codec::Jwt { kind: "jws" });
+    assert_eq!(n.range, [0, token.len()]);
+    assert_eq!(n.confidence, 0.97);
+
+    let (parts, times) = parts_of(&n);
+    assert_eq!(parts.len(), 3);
+    for p in parts {
+        assert_eq!(
+            p.codec,
+            Codec::Base64 {
+                alphabet: Alphabet::Url,
+                padded: false
+            }
+        );
+    }
+    // Ranges are the segments themselves, dots excluded.
+    assert_eq!(parts[0].range[0], 0);
+    assert_eq!(parts[1].range[0], parts[0].range[1] + 1);
+    assert_eq!(parts[2].range[0], parts[1].range[1] + 1);
+    assert_eq!(parts[2].range[1], token.len());
+    // Header and payload are text leaves; the signature is random bytes.
+    assert!(
+        matches!(&child(&parts[0]).detail, Detail::Text { text } if text.starts_with("{\"alg\""))
+    );
+    assert!(matches!(&child(&parts[1]).detail, Detail::Text { text } if text == payload));
+
+    let got: Vec<(String, String)> = times
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        [("iat".to_string(), "2018-01-18T01:30:22Z".to_string())]
+    );
+
+    let j = to_json(&n);
+    assert!(j.contains(r#""codec":"jwt","kind":"jws""#), "{j}");
+    assert!(j.contains(r#""parts":["#), "{j}");
+    assert!(
+        j.contains(r#""times":{"iat":"2018-01-18T01:30:22Z"}"#),
+        "{j}"
+    );
+    let t = to_tree(&n);
+    assert!(t.starts_with("jwt(jws) [0.."), "{t}");
+    assert!(t.contains("iat=2018-01-18T01:30:22Z"), "{t}");
+}
+
+#[test]
+fn jwt_alg_none_has_empty_signature() {
+    // `alg: none` tokens end in a dot with an empty signature segment.
+    let token = none_token(r#"{"exp":0}"#);
+    assert!(token.ends_with('.'));
+    let n = auto(token.as_bytes());
+    assert_eq!(n.codec, Codec::Jwt { kind: "jws" });
+    let (parts, _) = parts_of(&n);
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[2].range[0], parts[2].range[1]);
+    let c = child(&parts[2]);
+    assert_eq!(c.codec, Codec::Bytes);
+    assert!(matches!(&c.detail, Detail::Bytes { bytes } if bytes.is_empty()));
+}
+
+#[test]
+fn jwt_jwe_with_empty_encrypted_key() {
+    let token = jwe_token();
+    let n = auto(token.as_bytes());
+    assert_eq!(n.codec, Codec::Jwt { kind: "jwe" });
+    let (parts, times) = parts_of(&n);
+    assert_eq!(parts.len(), 5);
+    assert_eq!(parts[1].range[0], parts[1].range[1]);
+    assert!(times.is_empty());
+    let j = to_json(&n);
+    assert!(j.contains(r#""kind":"jwe""#), "{j}");
+    assert!(!j.contains(r#""times""#), "{j}");
+    let t = to_tree(&n);
+    assert!(t.starts_with("jwt(jwe) [0.."), "{t}");
+}
+
+#[test]
+fn jwt_nested_in_protobuf_string() {
+    let token = none_token(r#"{"exp":0}"#);
+    let mut proto = vec![0x0a, token.len() as u8];
+    proto.extend_from_slice(token.as_bytes());
+    let n = forced_pb(&proto).unwrap();
+    let f = &msg(&n)[0];
+    assert_eq!(f.number, 1);
+    let FieldValue::Len { alts, .. } = &f.value else {
+        panic!("not LEN")
+    };
+    let d = alts
+        .iter()
+        .find_map(|a| match &a.kind {
+            AltKind::String {
+                decoded: Some(d), ..
+            } if matches!(&d.codec, Codec::Jwt { .. }) => Some(d),
+            _ => None,
+        })
+        .expect("the string alt should decode to the nested JWT");
+    assert_eq!(d.codec, Codec::Jwt { kind: "jws" });
+    assert!(to_json(d).contains(r#""exp":"1970-01-01T00:00:00Z""#));
+}
+
+#[test]
+fn dotted_text_is_not_a_jwt() {
+    for s in ["a.b.c", "1.2.3", "www.example.com"] {
+        assert_ne!(auto(s.as_bytes()).codec.name(), "jwt", "{s}");
+    }
+    // Three base64url segments, but the header is not JSON with "alg".
+    let no_alg = jws(r#"{"typ":"JWT"}"#, r#"{"x":1}"#, b"sig");
+    assert_ne!(auto(no_alg.as_bytes()).codec.name(), "jwt", "{no_alg}");
+    let not_json = format!("{}.{}.{}", b64url(b"not json"), b64url(b"{}"), b64url(b"x"));
+    assert_ne!(auto(not_json.as_bytes()).codec.name(), "jwt", "{not_json}");
+}
+
+#[test]
+fn jwt_time_claims() {
+    let cases = [
+        (0i64, "1970-01-01T00:00:00Z"),
+        (-1, "1969-12-31T23:59:59Z"),
+        (1_709_164_800, "2024-02-29T00:00:00Z"),
+        (4_102_444_800, "2100-01-01T00:00:00Z"),
+        (2_147_483_648, "2038-01-19T03:14:08Z"),
+    ];
+    for (epoch, iso) in cases {
+        let token = hs256_token(&format!("{{\"exp\":{epoch}}}"));
+        let n = auto(token.as_bytes());
+        let (_, times) = parts_of(&n);
+        assert_eq!(times.len(), 1, "{epoch}");
+        assert_eq!(times[0].0, "exp", "{epoch}");
+        assert_eq!(times[0].1, iso, "{epoch}");
+    }
+}
+
+#[test]
+fn jwt_time_claims_order_and_fraction() {
+    // Fixed order exp, nbf, iat; a fractional part is truncated toward zero.
+    let token = hs256_token(r#"{"iat":1,"nbf":2,"exp":1516239022.5}"#);
+    let n = auto(token.as_bytes());
+    let (_, times) = parts_of(&n);
+    let got: Vec<(&str, &str)> = times.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("exp", "2018-01-18T01:30:22Z"),
+            ("nbf", "1970-01-01T00:00:02Z"),
+            ("iat", "1970-01-01T00:00:01Z"),
+        ]
+    );
+}
+
+#[test]
+fn jwt_time_claims_are_top_level_numbers_only() {
+    for payload in [
+        r#"{"x":{"exp":5}}"#,
+        r#"{"a":"exp"}"#,
+        r#"{"exp":"5"}"#,
+        r#"{"exp":null}"#,
+        r#"[{"exp":5}]"#,
+    ] {
+        let token = hs256_token(payload);
+        let n = auto(token.as_bytes());
+        assert_eq!(n.codec.name(), "jwt", "{payload}");
+        let (_, times) = parts_of(&n);
+        assert!(times.is_empty(), "{payload} -> {times:?}");
+    }
+}
+
 // ------------------------------------------------------------ JSON
 
 #[test]
@@ -529,6 +774,10 @@ fn json_is_valid_and_deterministic() {
         h("308103 020105"),
         ISRG_X2.as_bytes().to_vec(),
         XXD.as_bytes().to_vec(),
+        include_bytes!("fixtures/msg.bin.gz").to_vec(),
+        include_bytes!("fixtures/two-members.gz").to_vec(),
+        include_bytes!("fixtures/json.zst").to_vec(),
+        include_bytes!("fixtures/text.zlib").to_vec(),
         HEXDUMP.as_bytes().to_vec(),
         h("3012 0c03e282ac 1e04d83dde00 170d3236313131323039333030305a"),
         h("deadbeef"),
@@ -540,6 +789,10 @@ fn json_is_valid_and_deterministic() {
         )
         .into_bytes(),
         vec![0x0a, 0x02, 0x01, 0x02],
+        hs256_token(r#"{"exp":1516239022,"nbf":0,"iat":-1}"#).into_bytes(),
+        none_token(r#"{"exp":0}"#).into_bytes(),
+        jwe_token().into_bytes(),
+        b"a.b.c".to_vec(),
         Vec::new(),
     ];
     for input in inputs {

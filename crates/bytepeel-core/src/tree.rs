@@ -58,8 +58,14 @@ fn node(o: &mut String, n: &Node, d: usize) {
         Codec::Pem { label } => {
             let _ = write!(o, "({label})");
         }
+        Codec::Gzip { name: Some(name) } => {
+            let _ = write!(o, "({name:?})");
+        }
         Codec::Dump { style } => {
             let _ = write!(o, "({style})");
+        }
+        Codec::Jwt { kind } => {
+            let _ = write!(o, "({kind})");
         }
         _ => {}
     }
@@ -83,6 +89,22 @@ fn node(o: &mut String, n: &Node, d: usize) {
             o.push('\n');
             for e in items {
                 asn1(o, e, d + 1);
+            }
+        }
+        Detail::Parts { parts, times } => {
+            o.push('\n');
+            for p in parts {
+                node(o, p, d + 1);
+            }
+            if !times.is_empty() {
+                indent(o, d + 1);
+                for (i, (claim, iso)) in times.iter().enumerate() {
+                    if i > 0 {
+                        o.push(' ');
+                    }
+                    let _ = write!(o, "{claim}={iso}");
+                }
+                o.push('\n');
             }
         }
         Detail::Text { text } => {

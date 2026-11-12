@@ -28,15 +28,31 @@ alternatives instead of guessing silently.
 ## Pipeline
 
 ```
-input ─┬─ text? ─► best text layer (PEM | xxd/hexdump | hex | base64) ─► recurse on decoded bytes
-       └─ bytes ─► DER (a single well-formed SEQUENCE) ─► element tree
-                 └► magic sniff (gzip/zstd/zlib/png/zip) ─► leaf + UNSUPPORTED_FORMAT
+input ─┬─ text? ─► best text layer (PEM | JWT | xxd/hexdump | hex | base64) ─► recurse on decoded bytes
+       │            JWT recurses into one base64 layer per dot-separated part
+       └─ bytes ─► gzip | zlib | zstd (checksum-verified) ─► recurse on decompressed bytes
+                 └► DER (a single well-formed SEQUENCE) ─► element tree
+                 └► magic sniff (png/zip) ─► leaf + UNSUPPORTED_FORMAT
                  └► schemaless protobuf (if plausible) ─► LEN fields ranked:
                        message | string (string may decode further) | packed_varint | bytes
                  └► bytes leaf
 ```
 
-`--depth` limits total nesting (text layers plus protobuf messages, default 16).
+`--depth` limits total nesting (text and compression layers plus protobuf
+messages, default 16). `--as` applies after any text and compression layers.
+
+### Cargo features (`bytepeel-core`)
+
+The core is zero-dependency by default. Decoders that need a third-party crate
+are opt-in; the `bytepeel` CLI enables all of them.
+
+| Feature | Adds | Dependency |
+|---|---|---|
+| `deflate` | gzip (incl. multi-member), zlib | `miniz_oxide` |
+| `zstd` | Zstandard (incl. multi-frame) | `ruzstd` |
+
+Without a feature, a stream it would decode is a `bytes` leaf with an
+`UNSUPPORTED_FORMAT` warning naming the missing feature.
 
 ## JSON schema
 
@@ -44,16 +60,20 @@ input ─┬─ text? ─► best text layer (PEM | xxd/hexdump | hex | base64) 
 
 ```jsonc
 {
-  "codec": "hex" | "dump" | "base64" | "pem" | "protobuf" | "der" | "utf8" | "bytes",
+  "codec": "hex" | "dump" | "base64" | "pem" | "jwt" | "gzip" | "zlib" | "zstd"
+         | "protobuf" | "der" | "utf8" | "bytes",
   "alphabet": "std" | "url", "padded": bool,   // base64 only
   "label": "CERTIFICATE",                      // pem only
   "style": "xxd" | "hexdump",                  // dump only
+  "kind": "jws" | "jwe",                       // jwt only
+  "name": "msg.bin",                           // gzip only, when the header has FNAME
   "range": [start, end],                       // half-open, in the parent buffer
   "confidence": 0.95,                          // 0..1, confidence in `codec`
   // exactly one of:
-  "decoded_len": N, "child": Node,             // hex | dump | base64 | pem
+  "decoded_len": N, "child": Node,             // hex | dump | base64 | pem | gzip | zlib | zstd
   "fields": [Field],                           // protobuf
   "items": [Element],                          // der
+  "parts": [Node], "times": {"exp": "..."},    // jwt
   "text": "...", "truncated": true?,           // utf8 (capped at 1024 chars)
   "len": N, "hex": "...", "truncated": true?,  // bytes (hex capped at 64 bytes)
   "warnings": [Diag]                           // omitted when empty
@@ -112,6 +132,26 @@ input ─┬─ text? ─► best text layer (PEM | xxd/hexdump | hex | base64) 
 Element ranges are absolute within the DER buffer, including elements inside
 encapsulating BIT/OCTET STRINGs. NULL has no value key.
 
+### JWT
+
+```jsonc
+{ "codec": "jwt", "kind": "jws",             // "jws" = 3 parts, "jwe" = 5
+  "range": [0, N], "confidence": 0.97,
+  "parts": [                                 // one base64 layer node per segment
+    { "codec": "base64", "alphabet": "url", "padded": false,
+      "range": [s, e],                       // the segment's range in the token
+      "decoded_len": L, "child": Node }      // header/payload are utf8 JSON text
+  ],
+  "times": { "exp": "2026-11-12T09:30:00Z", "iat": "..." }  // omitted when none
+}
+```
+
+A JWS payload that is a JSON object contributes its top-level integer `exp`,
+`nbf` and `iat` claims as ISO-8601 UTC strings, always in `exp`, `nbf`, `iat`
+order and only when present. A fractional part is truncated toward zero;
+exponent notation, non-numbers and `i64` overflow are ignored. Nested claims
+(inside objects/arrays/strings) are never read. JWE tokens carry no `times`.
+
 ### Number encoding
 
 - 64-bit integers (varint views, `fixed64`, `sfixed64`, packed values) are
@@ -130,6 +170,7 @@ A `range` points into the buffer the node or field was parsed from:
 - Protobuf fields at any nesting depth use offsets into the same message
   buffer, so nested fields have absolute offsets within it.
 - A string alt's `decoded` node starts a new buffer at that string's bytes.
+- A JWT part's `child` starts a new buffer at that part's decoded bytes.
 - DER elements at any nesting depth (encapsulated ones included) use offsets
   into the same DER buffer.
 
@@ -154,10 +195,14 @@ A `range` points into the buffer the node or field was parsed from:
 | Base64: non-zero unused trailing bits | ×0.3, plus `NONCANONICAL_BASE64` warning |
 | Base64: only hex chars / no digit and no symbol | ×0.5 / ×0.6 |
 | Dump (`xxd` / `hexdump -C`) | 0.98; needs an offset-0 first line with `:` (xxd) or two spaces and a `|` column (hexdump), contiguous offsets, ≥1 byte |
+| JWT | 0.97; 3 (`jws`) or 5 (`jwe`) dot-separated unpadded base64url segments whose header is canonical base64url for printable UTF-8 JSON starting with `{` and containing `"alg"`; any segment may be empty |
 | Text layer threshold: top level / nested | > 0.5 / > 0.75 (nested also needs hex ≥8 chars, base64 ≥16 chars) |
 | Protobuf plausibility | starts at 0.9; ×0.85 per overlong varint, ×0.5 if a field number >1000 (×0.3 if >100k), ×0.7 per group, ×0.6 per wire-type conflict, ×0.6 for a single field in ≤3 bytes |
 | DER (auto) | buffer starts with `0x30`, ≥4 bytes, parses as exactly one element with no malformed universal content: 0.95 (0.8 plus `NONCANONICAL_DER` for non-minimal lengths or integers) |
 | DER encapsulation | BIT STRING (unused bits 0) / OCTET STRING content ≥2 bytes that parses completely as canonical, well-formed DER; a lone primitive must have a typed universal tag |
+| gzip / zstd | magic `1f 8b 08` / `28 b5 2f fd`; decoded (confidence 1.0) only if the stream is complete and its CRC32 / content checksum matches, else a `bytes` leaf with the error as a warning |
+| zlib | a valid 2-byte header (CM 8, CINFO ≤ 7, FCHECK, no FDICT) whose stream inflates with a matching Adler-32. Failures are reported only for the common headers `78 01/5e/9c/da`; other headers fall through to DER/protobuf |
+| Decompressed size | capped at 64 MiB (`OUTPUT_TOO_LARGE`) |
 | LEN alt: message | plausibility, ×0.3 if the payload is fully printable |
 | LEN alt: string | 0.9 × printable_ratio⁴ |
 | LEN alt: packed_varint | 0.25 if mostly non-printable, else 0.03 |
@@ -193,10 +238,13 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | `BAD_LENGTH` | DER length uses more than 8 bytes |
 | `BAD_TAG` | DER tag number exceeds 32 bits |
 | `BAD_DUMP` | An `xxd`/`hexdump` line is out of sequence or malformed (offset at the line) |
+| Warning: `CORRUPT_DATA` | A gzip/zlib/zstd stream is truncated or invalid |
+| Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
+| Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB |
 | Warning: `NONCANONICAL_BASE64` | Unused trailing bits are set |
-| Warning: `TRAILING_DATA` | Text outside the first PEM block was ignored |
+| Warning: `TRAILING_DATA` | Text outside the first PEM block, or bytes after a compressed stream, were ignored |
 | Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
-| Warning: `UNSUPPORTED_FORMAT` | Recognized by magic bytes; decoder not implemented yet |
+| Warning: `UNSUPPORTED_FORMAT` | Recognized by magic bytes; decoder not implemented, or its Cargo feature is off |
 
 ## Known limitations (MVP)
 
@@ -205,6 +253,9 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   `--as protobuf`.
 - Packed fields are only tried as varints, not as fixed32/fixed64.
 - Only the first PEM block is decoded.
+- JWT time claims are read only from a JWS payload that is a JSON object;
+  fractional seconds are truncated, exponent notation is ignored, and JWE
+  tokens have no claims.
 - Hex dumps must start at offset 0; `od` and plain `hexdump` (non `-C`) are not parsed.
 - DER: only OIDs in a built-in table (~85) are named; BER indefinite
   lengths and constructed strings are not supported.
@@ -212,10 +263,8 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 ## Roadmap
 
-1. gzip, zlib and zstd layers (first optional dependency, behind a feature flag)
-2. JWT (`header.payload.signature`)
-3. CBOR and MessagePack
-4. Multiple PEM blocks
-5. `cargo-fuzz` targets for every parser; property tests (encode → peel round-trip)
-6. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
-7. WASM build of `bytepeel-core` → npm package
+1. CBOR and MessagePack
+2. Multiple PEM blocks
+3. `cargo-fuzz` targets for every parser (round-trip property tests exist)
+4. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
+5. WASM build of `bytepeel-core` → npm package

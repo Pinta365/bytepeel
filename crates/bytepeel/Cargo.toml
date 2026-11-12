@@ -1,6 +1,6 @@
 [package]
 name = "bytepeel"
-description = "Peel layers of encoding off binary data: hex, base64, PEM and schemaless protobuf, with JSON output built for AI agents"
+description = "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1) with JSON output built for AI agents"
 keywords = ["protobuf", "base64", "decoder", "binary", "cli"]
 categories = ["command-line-utilities", "encoding"]
 version.workspace = true
@@ -14,4 +14,4 @@ name = "bytepeel"
 path = "src/main.rs"
 
 [dependencies]
-bytepeel-core = { path = "../bytepeel-core", version = "0.1.0" }
+bytepeel-core = { path = "../bytepeel-core", version = "0.1.0", features = ["deflate", "zstd"] }

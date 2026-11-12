@@ -1,6 +1,8 @@
 //! Layer detection: decides what each buffer is and recurses.
 
-use crate::node::{Codec, Detail, Node};
+use crate::compress::{self, Outcome};
+use crate::jwt;
+use crate::node::{Alphabet, Codec, Detail, Node};
 use crate::text::{self, is_printable};
 use crate::{Diag, Force, InputForm, Options};
 use crate::{der, dump, protobuf};
@@ -33,9 +35,14 @@ pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
             if opts.depth > 0 {
                 if let Ok(t) = std::str::from_utf8(input) {
                     if is_printable(t) {
-                        if let Some(c) = best_layer(t, false) {
-                            let child = finish(&c.decoded, 1, opts)?;
-                            return Ok(layer_node(c, input.len(), child));
+                        if let Some(p) = best_layer(t, false, 0, opts) {
+                            return Ok(match p {
+                                Picked::Layer(c) => {
+                                    let child = finish(&c.decoded, 1, opts)?;
+                                    layer_node(c, input.len(), child)
+                                }
+                                Picked::Jwt(node) => node,
+                            });
                         }
                     }
                 }
@@ -110,6 +117,13 @@ fn finish(buf: &[u8], depth: usize, opts: &Options) -> Result<Node, Diag> {
 }
 
 fn forced(buf: &[u8], depth: usize, opts: &Options, f: Force) -> Result<Node, Diag> {
+    // Compression is transparent: --as applies to the decompressed bytes.
+    if depth < opts.depth && f != Force::Bytes {
+        if let Some(Outcome::Decoded(i)) = compress::decompress(buf) {
+            let child = forced(&i.bytes, depth + 1, opts, f)?;
+            return Ok(compressed_node(i, buf.len(), child));
+        }
+    }
     match f {
         Force::Protobuf => {
             let (fields, st) = protobuf::parse_message(buf, 0, buf.len(), depth, opts)?;
@@ -160,19 +174,29 @@ pub(crate) fn nested_text_layer(t: &str, depth: usize, opts: &Options) -> Option
     if depth >= opts.depth {
         return None;
     }
-    let c = best_layer(t, true)?;
-    let child = detect(&c.decoded, depth + 1, opts, Mode::Nested);
-    Some(layer_node(c, t.len(), child))
-}
-
-fn keep(best: &mut Option<Cand>, c: Cand) {
-    if best.as_ref().is_none_or(|b| c.conf > b.conf) {
-        *best = Some(c);
+    match best_layer(t, true, depth, opts)? {
+        Picked::Layer(c) => {
+            let child = detect(&c.decoded, depth + 1, opts, Mode::Nested);
+            Some(layer_node(c, t.len(), child))
+        }
+        Picked::Jwt(node) => Some(node),
     }
 }
 
-fn best_layer(t: &str, nested: bool) -> Option<Cand> {
-    let mut best = None;
+/// A candidate text layer: bytes that still need a child, or a finished node.
+enum Picked {
+    Layer(Cand),
+    Jwt(Node),
+}
+
+fn keep(best: &mut Option<(f64, Picked)>, conf: f64, p: Picked) {
+    if best.as_ref().is_none_or(|(b, _)| conf > *b) {
+        *best = Some((conf, p));
+    }
+}
+
+fn best_layer(t: &str, nested: bool, depth: usize, opts: &Options) -> Option<Picked> {
+    let mut best: Option<(f64, Picked)> = None;
     if let Some(Ok(p)) = text::decode_pem(t) {
         let mut warnings = Vec::new();
         if p.trailing {
@@ -187,36 +211,42 @@ fn best_layer(t: &str, nested: bool) -> Option<Cand> {
         }
         keep(
             &mut best,
-            Cand {
+            0.99,
+            Picked::Layer(Cand {
                 codec: Codec::Pem { label: p.label },
                 decoded: p.b64.bytes,
                 conf: 0.99,
                 warnings,
-            },
+            }),
         );
     }
     if let Some(Ok(d)) = dump::decode_dump(t) {
         keep(
             &mut best,
-            Cand {
+            0.98,
+            Picked::Layer(Cand {
                 codec: Codec::Dump { style: d.style },
                 decoded: d.bytes,
                 conf: 0.98,
                 warnings: vec![],
-            },
+            }),
         );
+    }
+    if let Some(node) = jwt_node(t, depth, opts) {
+        keep(&mut best, 0.97, Picked::Jwt(node));
     }
     let core_len = t.trim().len();
     if !nested || core_len >= 8 {
         if let Some((bytes, conf)) = text::hex_candidate(t) {
             keep(
                 &mut best,
-                Cand {
+                conf,
+                Picked::Layer(Cand {
                     codec: Codec::Hex,
                     decoded: bytes,
                     conf,
                     warnings: vec![],
-                },
+                }),
             );
         }
     }
@@ -228,7 +258,8 @@ fn best_layer(t: &str, nested: bool) -> Option<Cand> {
             }
             keep(
                 &mut best,
-                Cand {
+                conf,
+                Picked::Layer(Cand {
                     codec: Codec::Base64 {
                         alphabet: b.alphabet,
                         padded: b.padded,
@@ -236,7 +267,7 @@ fn best_layer(t: &str, nested: bool) -> Option<Cand> {
                     decoded: b.bytes,
                     conf,
                     warnings,
-                },
+                }),
             );
         }
     }
@@ -245,12 +276,58 @@ fn best_layer(t: &str, nested: bool) -> Option<Cand> {
     } else {
         TOP_THRESHOLD
     };
-    best.filter(|c| c.conf > threshold)
+    best.filter(|(c, _)| *c > threshold).map(|(_, p)| p)
+}
+
+/// Build the full JWT node: a base64 layer node per part, with the header and
+/// payload detected as text and time claims converted on the jwt node.
+fn jwt_node(t: &str, depth: usize, opts: &Options) -> Option<Node> {
+    let j = jwt::decode_jwt(t)?;
+    let parts = j
+        .parts
+        .into_iter()
+        .map(|p| {
+            let child = detect(&p.decoded, depth + 1, opts, Mode::Nested);
+            Node {
+                codec: Codec::Base64 {
+                    alphabet: Alphabet::Url,
+                    padded: false,
+                },
+                range: p.range,
+                confidence: 1.0,
+                detail: Detail::Layer {
+                    decoded: p.decoded,
+                    child: Box::new(child),
+                },
+                warnings: vec![],
+            }
+        })
+        .collect();
+    Some(Node {
+        codec: Codec::Jwt { kind: j.kind },
+        range: [0, t.len()],
+        confidence: 0.97,
+        detail: Detail::Parts {
+            parts,
+            times: j.times,
+        },
+        warnings: vec![],
+    })
 }
 
 fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
     if buf.is_empty() {
         return bytes_leaf(buf, 1.0, vec![]);
+    }
+    if depth < opts.depth {
+        match compress::decompress(buf) {
+            Some(Outcome::Decoded(i)) => {
+                let child = detect(&i.bytes, depth + 1, opts, Mode::Nested);
+                return compressed_node(i, buf.len(), child);
+            }
+            Some(Outcome::Failed(d)) => return bytes_leaf(buf, 0.9, vec![d]),
+            None => {}
+        }
     }
     if let Some((items, st)) = der::detect(buf) {
         return der_node(buf.len(), items, &st);
@@ -283,12 +360,27 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
 /// Recognize formats by magic bytes so they are not misread as protobuf.
 fn sniff(buf: &[u8]) -> Option<&'static str> {
     match buf {
-        [0x1f, 0x8b, 0x08, ..] => Some("gzip"),
-        [0x28, 0xb5, 0x2f, 0xfd, ..] => Some("zstd"),
-        [0x78, 0x01 | 0x5e | 0x9c | 0xda, ..] => Some("zlib"),
         [0x89, b'P', b'N', b'G', ..] => Some("png"),
         [b'P', b'K', 0x03, 0x04, ..] => Some("zip"),
         _ => None,
+    }
+}
+
+fn compressed_node(i: compress::Inflated, len: usize, child: Node) -> Node {
+    let codec = match i.kind {
+        "gzip" => Codec::Gzip { name: i.name },
+        "zlib" => Codec::Zlib,
+        _ => Codec::Zstd,
+    };
+    Node {
+        codec,
+        range: [0, len],
+        confidence: 1.0,
+        detail: Detail::Layer {
+            decoded: i.bytes,
+            child: Box::new(child),
+        },
+        warnings: i.warnings,
     }
 }
 

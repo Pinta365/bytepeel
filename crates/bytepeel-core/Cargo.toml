@@ -1,7 +1,7 @@
 [package]
 name = "bytepeel-core"
-description = "Zero-dependency recursive decoder for encoded and binary data (hex, base64, PEM, schemaless protobuf) with confidence-ranked interpretations"
-keywords = ["protobuf", "base64", "decoder", "binary", "cli"]
+description = "Zero-dependency recursive decoder for encoded and binary data (hex, base64, PEM, JWT, schemaless protobuf, DER/ASN.1) with confidence-ranked interpretations"
+keywords = ["protobuf", "asn1", "base64", "decoder", "jwt"]
 categories = ["encoding", "parser-implementations"]
 version.workspace = true
 edition.workspace = true
@@ -10,4 +10,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# Intentionally empty: bytepeel-core is zero-dependency.
+# bytepeel-core is zero-dependency by default. Codecs that need a third-party
+# decoder are optional features (all pure Rust, no unsafe in our code).
+miniz_oxide = { version = "0.8.9", optional = true, default-features = false, features = ["with-alloc"] }
+ruzstd = { version = "0.8.2", optional = true }
+
+[features]
+default = []
+# gzip, zlib and raw DEFLATE layers.
+deflate = ["dep:miniz_oxide"]
+# Zstandard layers.
+zstd = ["dep:ruzstd"]

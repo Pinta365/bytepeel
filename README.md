@@ -21,7 +21,8 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 - **Agent-friendly:** compact JSON by default, byte ranges on everything, 64-bit
   integers as strings (safe for jq and JavaScript), and errors as
   `{"error":{"code","message","offset"}}` with stable codes.
-- **Zero-dependency core** (`bytepeel-core`) and a single static binary.
+- **Zero-dependency core** (`bytepeel-core`; gzip/zstd are opt-in features)
+  and a single static binary.
 
 ## Supported today
 
@@ -31,10 +32,12 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 | hex dumps | `xxd` (any `-g`) and `hexdump -C` (with `*` repeats); the ASCII column is ignored |
 | base64 | standard and URL-safe alphabets, padded and unpadded, line-wrapped |
 | PEM | any label; RFC 1421 headers skipped |
+| JWT | JWS (3 parts) and JWE (5 parts); each part decoded, and `exp`/`nbf`/`iat` rendered as ISO-8601 UTC |
 | protobuf | schemaless; groups, negative varints, fixed32/64 as int and float |
 | DER / ASN.1 | X.509, PKCS, CMS; ~85 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
 | utf8 / bytes | leaves |
-| gzip, zstd, zlib, PNG, zip | recognized by magic bytes; decoders on the roadmap |
+| gzip, zlib, zstd | checksum-verified, multi-member/frame, 64 MiB output cap (optional core features `deflate` and `zstd`, on in the CLI) |
+| PNG, zip | recognized by magic bytes; decoders on the roadmap |
 
 ## Usage
 

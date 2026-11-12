@@ -143,8 +143,15 @@ fn node(o: &mut String, n: &Node) {
             o.push_str(",\"label\":");
             esc(o, label);
         }
+        Codec::Gzip { name: Some(name) } => {
+            o.push_str(",\"name\":");
+            esc(o, name);
+        }
         Codec::Dump { style } => {
             let _ = write!(o, ",\"style\":\"{style}\"");
+        }
+        Codec::Jwt { kind } => {
+            let _ = write!(o, ",\"kind\":\"{kind}\"");
         }
         _ => {}
     }
@@ -165,6 +172,28 @@ fn node(o: &mut String, n: &Node) {
         Detail::Der { items } => {
             o.push_str(",\"items\":");
             asn1_arr(o, items);
+        }
+        Detail::Parts { parts, times } => {
+            o.push_str(",\"parts\":[");
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    o.push(',');
+                }
+                node(o, p);
+            }
+            o.push(']');
+            if !times.is_empty() {
+                o.push_str(",\"times\":{");
+                for (i, (claim, iso)) in times.iter().enumerate() {
+                    if i > 0 {
+                        o.push(',');
+                    }
+                    esc(o, claim);
+                    o.push(':');
+                    esc(o, iso);
+                }
+                o.push('}');
+            }
         }
         Detail::Text { text } => text_kv(o, "text", text),
         Detail::Bytes { bytes } => {
