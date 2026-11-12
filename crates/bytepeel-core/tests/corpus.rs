@@ -310,18 +310,13 @@ fn pem_with_der_payload() {
         }
     );
     let c = child(&n);
-    assert_eq!(c.codec, Codec::Bytes);
-    assert_eq!(c.warnings[0].code, "UNSUPPORTED_FORMAT");
+    assert_eq!(c.codec, Codec::Der);
+    assert!(c.warnings.is_empty());
 }
 
 #[test]
 fn magic_formats_are_not_misread_as_protobuf() {
-    for hex in [
-        "1f8b0800000000000000",
-        "28b52ffd0000",
-        "789c0300",
-        "3003020105",
-    ] {
+    for hex in ["1f8b0800000000000000", "28b52ffd0000", "789c0300"] {
         let n = auto(&h(hex));
         assert_eq!(n.codec, Codec::Bytes, "{hex}");
         assert_eq!(n.warnings[0].code, "UNSUPPORTED_FORMAT", "{hex}");
@@ -350,6 +345,173 @@ fn alts_limit() {
     }
 }
 
+// ------------------------------------------------------------ DER
+
+const ISRG_X2: &str = include_str!("fixtures/isrg-root-x2.pem");
+
+fn der(input: &[u8]) -> Result<Node, Diag> {
+    let opts = Options {
+        input: InputForm::Raw,
+        force: Some(Force::Der),
+        ..Options::default()
+    };
+    peel(input, &opts)
+}
+
+#[test]
+fn der_certificate() {
+    let n = auto(ISRG_X2.as_bytes());
+    assert_eq!(child(&n).codec, Codec::Der);
+    let el = |p: &str| select_der(&n, p).unwrap();
+    assert_eq!(el("0").tag_name(), "SEQUENCE");
+    assert_eq!(el("0.0.0").tag_name(), "[0]");
+    // Serial numbers are 16 bytes here: still rendered in decimal.
+    assert!(
+        asn1_to_json(el("0.0.1")).contains(r#""int":"87493402998870891108772069816698636114""#)
+    );
+    assert_eq!(
+        el("0.0.2.0").value,
+        Asn1Value::Oid("1.2.840.10045.4.3.3".into())
+    );
+    assert!(asn1_to_json(el("0.0.2.0")).contains(r#""name":"ecdsa-with-SHA384""#));
+    let not_before = asn1_to_json(el("0.0.4.0"));
+    assert!(
+        not_before.contains(r#""iso":"2020-09-04T00:00:00Z""#),
+        "{not_before}"
+    );
+    // Issuer CN is a PrintableString.
+    assert_eq!(
+        el("0.0.3.1.0.1").value,
+        Asn1Value::Text("Internet Security Research Group".into())
+    );
+    // The ECDSA signature BIT STRING encapsulates SEQUENCE { r, s }.
+    let sig = el("0.2");
+    assert!(matches!(
+        sig.value,
+        Asn1Value::Encapsulated {
+            unused_bits: Some(0),
+            ..
+        }
+    ));
+    assert_eq!(el("0.2.0.1").tag_name(), "INTEGER");
+    // A 49-byte integer is hex only.
+    let s_json = asn1_to_json(el("0.2.0.1"));
+    assert!(
+        !s_json.contains(r#""int""#) && s_json.contains(r#""hex":"008bf5"#),
+        "{s_json}"
+    );
+    // Raw payload of a BIT STRING drops the unused-bits byte.
+    assert_eq!(el("0.0.6.1").payload().unwrap()[0], 0x04);
+    assert_eq!(select_der(&n, "0.9").unwrap_err().code, "PATH_NOT_FOUND");
+    assert_eq!(
+        select_der(&n, "0.0.1.0").unwrap_err().code,
+        "PATH_NOT_MESSAGE"
+    );
+    assert_eq!(select_der(&n, "0.x").unwrap_err().code, "BAD_PATH");
+}
+
+#[test]
+fn der_encapsulation_needs_clean_der() {
+    // subjectKeyIdentifier style: OCTET STRING { OCTET STRING (20 bytes) }.
+    let ski = h("0416 0414 d287b4e3df37279355f656ea81e536cc8c1e3fbd");
+    let n = der(&ski).unwrap();
+    let Detail::Der { items } = &n.detail else {
+        panic!()
+    };
+    assert!(matches!(
+        items[0].value,
+        Asn1Value::Encapsulated {
+            unused_bits: None,
+            ..
+        }
+    ));
+    // Opaque bytes, and a lone context-tagged primitive, stay bytes.
+    for hex in ["0404deadbeef", "0404 8002 abcd"] {
+        let n = der(&h(hex)).unwrap();
+        let Detail::Der { items } = &n.detail else {
+            panic!()
+        };
+        assert_eq!(items[0].value, Asn1Value::Bytes, "{hex}");
+    }
+}
+
+#[test]
+fn der_integers_and_noncanonical_lengths() {
+    let n = auto(&h("3006 0201ff 020100"));
+    assert_eq!(n.codec, Codec::Der);
+    let j = to_json(&n);
+    assert!(
+        j.contains(r#""int":"-1""#) && j.contains(r#""int":"0""#),
+        "{j}"
+    );
+    // Long-form length for a 3-byte body: valid BER, flagged as non-DER.
+    let n = auto(&h("308103 020105"));
+    assert_eq!(n.codec, Codec::Der);
+    assert_eq!(n.warnings[0].code, "NONCANONICAL_DER");
+    assert!(n.confidence < 0.95);
+}
+
+#[test]
+fn der_errors_have_codes_and_offsets() {
+    let e = der(&h("3080 020105 0000")).unwrap_err();
+    assert_eq!((e.code, e.offset), ("INDEFINITE_LENGTH", Some(1)));
+    let e = der(&h("3005 0201")).unwrap_err();
+    assert_eq!((e.code, e.offset), ("TRUNCATED_ELEMENT", Some(1)));
+    let e = der(&h("3003 0205 01")).unwrap_err();
+    assert_eq!((e.code, e.offset), ("TRUNCATED_ELEMENT", Some(3)));
+}
+
+#[test]
+fn protobuf_starting_with_0x30_is_not_der() {
+    // Field 6 varint 150: 0x30 is also the SEQUENCE tag.
+    let n = auto(&h("309601"));
+    assert_eq!(n.codec, Codec::Protobuf);
+    // Parses as DER, but a BOOLEAN of length 2 is malformed: not DER.
+    let n = auto(&h("3004 0102 0101"));
+    assert_ne!(n.codec, Codec::Der);
+}
+
+// ------------------------------------------------------------ dumps
+
+const XXD: &str = "00000000: 0a03 666f 6f12 0568 656c 6c6f 1896 01    ..foo..hello...\n";
+const HEXDUMP: &str =
+    "00000000  0a 03 66 6f 6f 12 05 68  65 6c 6c 6f 18 96 01     |..foo..hello...|\n0000000f\n";
+
+#[test]
+fn xxd_and_hexdump_input() {
+    for (input, style) in [(XXD, "xxd"), (HEXDUMP, "hexdump")] {
+        let n = auto(input.as_bytes());
+        assert_eq!(n.codec, Codec::Dump { style }, "{style}");
+        assert_eq!(varint_value(select(&n, "3").unwrap()), 150);
+    }
+}
+
+#[test]
+fn dump_ascii_column_is_ignored() {
+    // The ASCII column of 0xca 0xfe 0xba 0xbe would never be hex, but a
+    // column made of hex-looking text must not be read as data either.
+    let n = auto(b"00000000: 6361 6665  cafe\n");
+    assert_eq!(n.codec, Codec::Dump { style: "xxd" });
+    assert_eq!(
+        child(&n).detail,
+        Detail::Text {
+            text: "cafe".into()
+        }
+    );
+}
+
+#[test]
+fn malformed_dump_errors_when_forced_as_hex() {
+    let opts = Options {
+        input: InputForm::Hex,
+        ..Options::default()
+    };
+    let e = peel(b"00000000: 0a03\n00000010: 0a03\n", &opts).unwrap_err();
+    assert_eq!((e.code, e.offset), ("BAD_DUMP", Some(15)));
+    // Plain hex is still plain hex under --in hex.
+    assert_eq!(peel(b"0a03666f6f", &opts).unwrap().codec, Codec::Hex);
+}
+
 // ------------------------------------------------------------ JSON
 
 #[test]
@@ -363,6 +525,12 @@ fn json_is_valid_and_deterministic() {
         h("0b10010c"),
         h("0a00"),
         h("3003020105"),
+        h("3006 0201ff 020100"),
+        h("308103 020105"),
+        ISRG_X2.as_bytes().to_vec(),
+        XXD.as_bytes().to_vec(),
+        HEXDUMP.as_bytes().to_vec(),
+        h("3012 0c03e282ac 1e04d83dde00 170d3236313131323039333030305a"),
         h("deadbeef"),
         b"SGVsbG8gd29ybGQ=".to_vec(),
         b"with \"quotes\" \\ and \t tabs".to_vec(),

@@ -5,8 +5,8 @@
 
 use std::fmt::Write as _;
 
-use crate::node::{Alt, AltKind, Codec, Detail, Field, FieldValue, Node};
-use crate::{Diag, varint};
+use crate::node::{Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node};
+use crate::{Diag, der, text, varint};
 
 const TEXT_CAP: usize = 1024;
 const HEX_CAP: usize = 64;
@@ -21,6 +21,12 @@ pub fn node_to_json(n: &Node) -> String {
 pub fn field_to_json(f: &Field) -> String {
     let mut o = String::new();
     field(&mut o, f);
+    o
+}
+
+pub fn asn1_to_json(e: &Asn1) -> String {
+    let mut o = String::new();
+    asn1(&mut o, e);
     o
 }
 
@@ -137,6 +143,9 @@ fn node(o: &mut String, n: &Node) {
             o.push_str(",\"label\":");
             esc(o, label);
         }
+        Codec::Dump { style } => {
+            let _ = write!(o, ",\"style\":\"{style}\"");
+        }
         _ => {}
     }
     let _ = write!(
@@ -152,6 +161,10 @@ fn node(o: &mut String, n: &Node) {
         Detail::Message { fields } => {
             o.push_str(",\"fields\":");
             fields_arr(o, fields);
+        }
+        Detail::Der { items } => {
+            o.push_str(",\"items\":");
+            asn1_arr(o, items);
         }
         Detail::Text { text } => text_kv(o, "text", text),
         Detail::Bytes { bytes } => {
@@ -264,6 +277,80 @@ fn alt(o: &mut String, a: &Alt, data: &[u8]) {
         }
         AltKind::Bytes => hex_kv(o, data),
         AltKind::Empty => {}
+    }
+    o.push('}');
+}
+
+fn asn1_arr(o: &mut String, items: &[Asn1]) {
+    o.push('[');
+    for (i, e) in items.iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        asn1(o, e);
+    }
+    o.push(']');
+}
+
+fn asn1(o: &mut String, e: &Asn1) {
+    o.push_str("{\"tag\":");
+    esc(o, &e.tag_name());
+    let content_len = e.content[1] - e.content[0];
+    let _ = write!(
+        o,
+        ",\"range\":[{},{}],\"len\":{content_len}",
+        e.range[0], e.range[1]
+    );
+    match &e.value {
+        Asn1Value::Constructed(items) => {
+            o.push_str(",\"children\":");
+            asn1_arr(o, items);
+        }
+        Asn1Value::Encapsulated { unused_bits, items } => {
+            if let Some(u) = unused_bits {
+                let _ = write!(o, ",\"unused_bits\":{u}");
+            }
+            o.push_str(",\"encapsulated\":true,\"children\":");
+            asn1_arr(o, items);
+        }
+        Asn1Value::Bool(b) => {
+            let _ = write!(o, ",\"bool\":{b}");
+        }
+        Asn1Value::Int => {
+            if e.raw.len() <= der::INT_DECIMAL_MAX {
+                let _ = write!(o, ",\"int\":\"{}\"", der::int_decimal(&e.raw));
+            }
+            if e.raw.len() > 8 {
+                hex_kv(o, &e.raw);
+            }
+        }
+        Asn1Value::Null => {}
+        Asn1Value::Oid(oid) => {
+            let _ = write!(o, ",\"oid\":\"{oid}\"");
+            if let Some(n) = der::oid_name(oid) {
+                let _ = write!(o, ",\"name\":\"{n}\"");
+            }
+        }
+        Asn1Value::Text(t) => text_kv(o, "value", t),
+        Asn1Value::Time { text, iso } => {
+            text_kv(o, "value", text);
+            if let Some(iso) = iso {
+                o.push_str(",\"iso\":");
+                esc(o, iso);
+            }
+        }
+        Asn1Value::BitString { unused_bits } => {
+            let _ = write!(o, ",\"unused_bits\":{unused_bits}");
+            hex_kv(o, &e.raw[1..]);
+        }
+        Asn1Value::Bytes => {
+            hex_kv(o, &e.raw);
+            if let Ok(t) = std::str::from_utf8(&e.raw) {
+                if !t.is_empty() && text::is_printable(t) {
+                    text_kv(o, "text", t);
+                }
+            }
+        }
     }
     o.push('}');
 }

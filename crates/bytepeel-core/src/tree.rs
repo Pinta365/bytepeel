@@ -2,8 +2,8 @@
 
 use std::fmt::Write as _;
 
-use crate::node::{AltKind, Codec, Detail, Field, FieldValue, Node};
-use crate::varint;
+use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node};
+use crate::{der, varint};
 
 pub fn node_to_tree(n: &Node) -> String {
     let mut o = String::new();
@@ -14,6 +14,12 @@ pub fn node_to_tree(n: &Node) -> String {
 pub fn field_to_tree(f: &Field) -> String {
     let mut o = String::new();
     field(&mut o, f, 0);
+    o
+}
+
+pub fn asn1_to_tree(e: &Asn1) -> String {
+    let mut o = String::new();
+    asn1(&mut o, e, 0);
     o
 }
 
@@ -52,6 +58,9 @@ fn node(o: &mut String, n: &Node, d: usize) {
         Codec::Pem { label } => {
             let _ = write!(o, "({label})");
         }
+        Codec::Dump { style } => {
+            let _ = write!(o, "({style})");
+        }
         _ => {}
     }
     let _ = write!(
@@ -68,6 +77,12 @@ fn node(o: &mut String, n: &Node, d: usize) {
             o.push('\n');
             for f in fields {
                 field(o, f, d + 1);
+            }
+        }
+        Detail::Der { items } => {
+            o.push('\n');
+            for e in items {
+                asn1(o, e, d + 1);
             }
         }
         Detail::Text { text } => {
@@ -156,6 +171,65 @@ fn field(o: &mut String, f: &Field, d: usize) {
             for f in fields {
                 field(o, f, d + 1);
             }
+        }
+    }
+}
+
+fn asn1(o: &mut String, e: &Asn1, d: usize) {
+    indent(o, d);
+    let _ = write!(o, "{} [{}..{}]", e.tag_name(), e.range[0], e.range[1]);
+    match &e.value {
+        Asn1Value::Constructed(items) => {
+            o.push('\n');
+            for c in items {
+                asn1(o, c, d + 1);
+            }
+        }
+        Asn1Value::Encapsulated { items, .. } => {
+            o.push_str(" (encapsulated)\n");
+            for c in items {
+                asn1(o, c, d + 1);
+            }
+        }
+        Asn1Value::Bool(b) => {
+            let _ = writeln!(o, " {b}");
+        }
+        Asn1Value::Int if e.raw.len() <= der::INT_DECIMAL_MAX => {
+            let _ = writeln!(o, " {}", der::int_decimal(&e.raw));
+        }
+        Asn1Value::Int => {
+            let _ = write!(o, " ({} bytes) ", e.raw.len());
+            hex_preview(o, &e.raw);
+            o.push('\n');
+        }
+        Asn1Value::Null => o.push('\n'),
+        Asn1Value::Oid(oid) => {
+            let _ = write!(o, " {oid}");
+            if let Some(n) = der::oid_name(oid) {
+                let _ = write!(o, " ({n})");
+            }
+            o.push('\n');
+        }
+        Asn1Value::Text(t) => {
+            o.push(' ');
+            quote(o, t, 80);
+            o.push('\n');
+        }
+        Asn1Value::Time { text, iso } => {
+            let _ = writeln!(o, " {}", iso.as_deref().unwrap_or(text));
+        }
+        Asn1Value::BitString { unused_bits } => {
+            let _ = write!(o, " unused={unused_bits} ");
+            hex_preview(o, &e.raw[1..]);
+            o.push('\n');
+        }
+        Asn1Value::Bytes => {
+            let _ = write!(o, " len={} ", e.raw.len());
+            match std::str::from_utf8(&e.raw) {
+                Ok(t) if !t.is_empty() && crate::text::is_printable(t) => quote(o, t, 80),
+                _ => hex_preview(o, &e.raw),
+            }
+            o.push('\n');
         }
     }
 }

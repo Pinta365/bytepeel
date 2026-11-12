@@ -28,11 +28,13 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 | Layer | Notes |
 |---|---|
 | hex | whitespace, `:` and `0x` separators |
+| hex dumps | `xxd` (any `-g`) and `hexdump -C` (with `*` repeats); the ASCII column is ignored |
 | base64 | standard and URL-safe alphabets, padded and unpadded, line-wrapped |
 | PEM | any label; RFC 1421 headers skipped |
 | protobuf | schemaless; groups, negative varints, fixed32/64 as int and float |
+| DER / ASN.1 | X.509, PKCS, CMS; ~85 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
 | utf8 / bytes | leaves |
-| gzip, zstd, zlib, DER, PNG, zip | recognized by magic bytes; decoders on the roadmap |
+| gzip, zstd, zlib, PNG, zip | recognized by magic bytes; decoders on the roadmap |
 
 ## Usage
 
@@ -40,11 +42,12 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
 
 --in <auto|hex|base64|raw>           how to read the input (default: auto)
---as <protobuf|text|bytes>           force interpretation of the decoded bytes
+--as <protobuf|der|text|bytes>       force interpretation of the decoded bytes
 --depth <N>                          max nesting (default 16)
 --alts <N>                           interpretations kept per LEN field (default 3)
---get <PATH>                         select one field, e.g. 1.3[2].4
---format <json|tree|raw>             raw writes a --get field's payload bytes
+--get <PATH>                         protobuf: field numbers, e.g. 1.3[2].4
+                                     DER: 0-based child indices, e.g. 0.0.6
+--format <json|tree|raw>             raw writes a --get selection's payload bytes
 ```
 
 Exit codes: `0` success, `1` decode error, `2` usage or I/O error.
@@ -55,6 +58,11 @@ $ echo '10 fe ff ff ff ff ff ff ff ff 01' | bytepeel
 
 $ echo 1a03089601 | bytepeel --get 3.1 --format raw | xxd
 00000000: 9601
+
+$ bytepeel cert.pem --get 0.0.4 --format tree        # X.509 validity
+SEQUENCE [124..156]
+  UTCTime [126..141] 2020-09-04T00:00:00Z
+  UTCTime [141..156] 2040-09-17T16:00:00Z
 ```
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,

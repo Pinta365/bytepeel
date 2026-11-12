@@ -16,7 +16,9 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod der;
 mod detect;
+mod dump;
 mod error;
 mod json;
 mod node;
@@ -27,8 +29,10 @@ mod tree;
 pub mod varint;
 
 pub use error::Diag;
-pub use node::{Alphabet, Alt, AltKind, Codec, Detail, Field, FieldValue, Node};
-pub use path::select;
+pub use node::{
+    Alphabet, Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass,
+};
+pub use path::{is_der, select, select_der};
 pub use text::{B64, decode_b64, decode_hex};
 
 /// How to read the top-level input.
@@ -48,6 +52,7 @@ pub enum InputForm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Force {
     Protobuf,
+    Der,
     Text,
     Bytes,
 }
@@ -103,6 +108,16 @@ pub fn diag_to_json(diag: &Diag) -> String {
 /// Render a node tree as an indented, human-readable outline.
 pub fn to_tree(node: &Node) -> String {
     tree::node_to_tree(node)
+}
+
+/// Serialize a single DER element (e.g. the result of [`select_der`]) as JSON.
+pub fn asn1_to_json(e: &Asn1) -> String {
+    json::asn1_to_json(e)
+}
+
+/// Render a single DER element as an indented outline.
+pub fn asn1_to_tree(e: &Asn1) -> String {
+    tree::asn1_to_tree(e)
 }
 
 /// Render a single protobuf field as an indented outline.

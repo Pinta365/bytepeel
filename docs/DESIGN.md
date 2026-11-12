@@ -28,8 +28,9 @@ alternatives instead of guessing silently.
 ## Pipeline
 
 ```
-input ─┬─ text? ─► best text layer (PEM | hex | base64) ─► recurse on decoded bytes
-       └─ bytes ─► magic sniff (gzip/zstd/zlib/png/zip/DER) ─► leaf + UNSUPPORTED_FORMAT
+input ─┬─ text? ─► best text layer (PEM | xxd/hexdump | hex | base64) ─► recurse on decoded bytes
+       └─ bytes ─► DER (a single well-formed SEQUENCE) ─► element tree
+                 └► magic sniff (gzip/zstd/zlib/png/zip) ─► leaf + UNSUPPORTED_FORMAT
                  └► schemaless protobuf (if plausible) ─► LEN fields ranked:
                        message | string (string may decode further) | packed_varint | bytes
                  └► bytes leaf
@@ -43,14 +44,16 @@ input ─┬─ text? ─► best text layer (PEM | hex | base64) ─► recurse
 
 ```jsonc
 {
-  "codec": "hex" | "base64" | "pem" | "protobuf" | "utf8" | "bytes",
+  "codec": "hex" | "dump" | "base64" | "pem" | "protobuf" | "der" | "utf8" | "bytes",
   "alphabet": "std" | "url", "padded": bool,   // base64 only
   "label": "CERTIFICATE",                      // pem only
+  "style": "xxd" | "hexdump",                  // dump only
   "range": [start, end],                       // half-open, in the parent buffer
   "confidence": 0.95,                          // 0..1, confidence in `codec`
   // exactly one of:
-  "decoded_len": N, "child": Node,             // hex | base64 | pem
+  "decoded_len": N, "child": Node,             // hex | dump | base64 | pem
   "fields": [Field],                           // protobuf
+  "items": [Element],                          // der
   "text": "...", "truncated": true?,           // utf8 (capped at 1024 chars)
   "len": N, "hex": "...", "truncated": true?,  // bytes (hex capped at 64 bytes)
   "warnings": [Diag]                           // omitted when empty
@@ -83,6 +86,32 @@ input ─┬─ text? ─► best text layer (PEM | hex | base64) ─► recurse
 { "as": "empty", "score": 1.0 }
 ```
 
+### Element (DER)
+
+```jsonc
+{ "tag": "SEQUENCE",          // universal type name, or "[0]", "[APPLICATION 3]", "[PRIVATE 1]", "[UNIVERSAL 31]"
+  "range": [s, e],            // whole element, header included
+  "len": N,                   // content length
+  // constructed (SEQUENCE, SET, [n] constructed):
+  "children": [Element],
+  // BIT STRING / OCTET STRING whose content is itself clean DER:
+  "unused_bits": 0,           // BIT STRING only
+  "encapsulated": true, "children": [Element],
+  // primitives, by universal type:
+  "int": "-1",                // INTEGER, ENUMERATED: decimal string, up to 16 bytes
+  "hex": "…",                 //   … plus hex when longer than 8 bytes (hex only above 16)
+  "bool": true,               // BOOLEAN
+  "oid": "2.5.4.3", "name": "commonName",   // OBJECT IDENTIFIER / RELATIVE-OID; name when known
+  "value": "…",               // character strings (BMP/Universal/T61 decoded to UTF-8)
+  "value": "200904000000Z", "iso": "2020-09-04T00:00:00Z",  // UTCTime, GeneralizedTime
+  "unused_bits": 3, "hex": "…",            // BIT STRING (not encapsulated)
+  "hex": "…", "text": "…"     // anything else (OCTET STRING, [n] primitive, …); text when printable UTF-8
+}
+```
+
+Element ranges are absolute within the DER buffer, including elements inside
+encapsulating BIT/OCTET STRINGs. NULL has no value key.
+
 ### Number encoding
 
 - 64-bit integers (varint views, `fixed64`, `sfixed64`, packed values) are
@@ -101,6 +130,19 @@ A `range` points into the buffer the node or field was parsed from:
 - Protobuf fields at any nesting depth use offsets into the same message
   buffer, so nested fields have absolute offsets within it.
 - A string alt's `decoded` node starts a new buffer at that string's bytes.
+- DER elements at any nesting depth (encapsulated ones included) use offsets
+  into the same DER buffer.
+
+### Paths (`--get`)
+
+- Protobuf: field numbers separated by `.`; `N[i]` picks the i-th occurrence
+  (`1.3[2].4`). A LEN field is entered through its best `message` alt.
+- DER: 0-based child indices separated by `.`; the first segment indexes the
+  top-level elements, so `0.0.6` is a certificate's subjectPublicKeyInfo.
+  Encapsulating BIT/OCTET STRINGs are entered like constructed elements.
+- Text layers are descended automatically. `--format raw` writes the payload:
+  a field's bytes, or a primitive element's content (a BIT STRING without its
+  unused-bits byte).
 
 ## Heuristics (tunable; each has a test)
 
@@ -111,8 +153,11 @@ A `range` points into the buffer the node or field was parsed from:
 | Base64: ≥16 chars / has `+/-_` or `=` / unpadded | +0.1 / +0.1 / −0.05 |
 | Base64: non-zero unused trailing bits | ×0.3, plus `NONCANONICAL_BASE64` warning |
 | Base64: only hex chars / no digit and no symbol | ×0.5 / ×0.6 |
+| Dump (`xxd` / `hexdump -C`) | 0.98; needs an offset-0 first line with `:` (xxd) or two spaces and a `|` column (hexdump), contiguous offsets, ≥1 byte |
 | Text layer threshold: top level / nested | > 0.5 / > 0.75 (nested also needs hex ≥8 chars, base64 ≥16 chars) |
 | Protobuf plausibility | starts at 0.9; ×0.85 per overlong varint, ×0.5 if a field number >1000 (×0.3 if >100k), ×0.7 per group, ×0.6 per wire-type conflict, ×0.6 for a single field in ≤3 bytes |
+| DER (auto) | buffer starts with `0x30`, ≥4 bytes, parses as exactly one element with no malformed universal content: 0.95 (0.8 plus `NONCANONICAL_DER` for non-minimal lengths or integers) |
+| DER encapsulation | BIT STRING (unused bits 0) / OCTET STRING content ≥2 bytes that parses completely as canonical, well-formed DER; a lone primitive must have a typed universal tag |
 | LEN alt: message | plausibility, ×0.3 if the payload is fully printable |
 | LEN alt: string | 0.9 × printable_ratio⁴ |
 | LEN alt: packed_varint | 0.25 if mostly non-printable, else 0.03 |
@@ -142,9 +187,15 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | `UNEXPECTED_END_GROUP` / `UNTERMINATED_GROUP` | Group tags do not pair up |
 | `NESTING_TOO_DEEP` | More than 100 nested groups |
 | `BAD_PATH` / `PATH_NOT_FOUND` / `PATH_NOT_MESSAGE` | `--get` path problems |
-| `NO_PAYLOAD` | `--format raw` on a group |
+| `NO_PAYLOAD` | `--format raw` on a group or constructed DER element |
+| `TRUNCATED_ELEMENT` | A DER element runs past the end of its container (offset at its length) |
+| `INDEFINITE_LENGTH` | BER indefinite length (`0x80`); not DER |
+| `BAD_LENGTH` | DER length uses more than 8 bytes |
+| `BAD_TAG` | DER tag number exceeds 32 bits |
+| `BAD_DUMP` | An `xxd`/`hexdump` line is out of sequence or malformed (offset at the line) |
 | Warning: `NONCANONICAL_BASE64` | Unused trailing bits are set |
 | Warning: `TRAILING_DATA` | Text outside the first PEM block was ignored |
+| Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
 | Warning: `UNSUPPORTED_FORMAT` | Recognized by magic bytes; decoder not implemented yet |
 
 ## Known limitations (MVP)
@@ -154,14 +205,17 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   `--as protobuf`.
 - Packed fields are only tried as varints, not as fixed32/fixed64.
 - Only the first PEM block is decoded.
-- xxd/hexdump-style dumps (with offsets and an ASCII column) are not parsed yet.
+- Hex dumps must start at offset 0; `od` and plain `hexdump` (non `-C`) are not parsed.
+- DER: only OIDs in a built-in table (~85) are named; BER indefinite
+  lengths and constructed strings are not supported.
+- `--get` on DER can't descend into a protobuf string or vice versa.
 
 ## Roadmap
 
 1. gzip, zlib and zstd layers (first optional dependency, behind a feature flag)
-2. JWT (`header.payload.signature`) and DER/ASN.1 with OID names
+2. JWT (`header.payload.signature`)
 3. CBOR and MessagePack
-4. xxd and hexdump input formats; multiple PEM blocks
+4. Multiple PEM blocks
 5. `cargo-fuzz` targets for every parser; property tests (encode → peel round-trip)
 6. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
 7. WASM build of `bytepeel-core` → npm package

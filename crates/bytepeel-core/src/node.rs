@@ -25,9 +25,19 @@ impl Alphabet {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Codec {
     Hex,
-    Base64 { alphabet: Alphabet, padded: bool },
-    Pem { label: String },
+    /// A hex dump with an offset column (`style` is `xxd` or `hexdump`).
+    Dump {
+        style: &'static str,
+    },
+    Base64 {
+        alphabet: Alphabet,
+        padded: bool,
+    },
+    Pem {
+        label: String,
+    },
     Protobuf,
+    Der,
     Utf8,
     Bytes,
 }
@@ -36,9 +46,11 @@ impl Codec {
     pub fn name(&self) -> &'static str {
         match self {
             Codec::Hex => "hex",
+            Codec::Dump { .. } => "dump",
             Codec::Base64 { .. } => "base64",
             Codec::Pem { .. } => "pem",
             Codec::Protobuf => "protobuf",
+            Codec::Der => "der",
             Codec::Utf8 => "utf8",
             Codec::Bytes => "bytes",
         }
@@ -61,6 +73,8 @@ pub enum Detail {
     Layer { decoded: Vec<u8>, child: Box<Node> },
     /// A protobuf message.
     Message { fields: Vec<Field> },
+    /// DER-encoded ASN.1: one or more top-level elements.
+    Der { items: Vec<Asn1> },
     /// Printable UTF-8 text.
     Text { text: String },
     /// Opaque bytes (nothing more specific was found, or the format is not yet supported).
@@ -150,6 +164,100 @@ impl AltKind {
             AltKind::PackedVarint(_) => "packed_varint",
             AltKind::Bytes => "bytes",
             AltKind::Empty => "empty",
+        }
+    }
+}
+
+/// ASN.1 tag class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagClass {
+    Universal,
+    Application,
+    Context,
+    Private,
+}
+
+/// One DER element (tag, length, value).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asn1 {
+    pub class: TagClass,
+    pub number: u32,
+    pub constructed: bool,
+    /// Range of the whole element, header included.
+    pub range: [usize; 2],
+    /// Range of the content (header excluded).
+    pub content: [usize; 2],
+    /// Content bytes of a primitive element (empty when constructed).
+    pub raw: Vec<u8>,
+    pub value: Asn1Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Asn1Value {
+    /// A constructed element (SEQUENCE, SET, `[0]`, ...).
+    Constructed(Vec<Asn1>),
+    /// A BIT STRING or OCTET STRING whose content is itself DER.
+    /// `unused_bits` is `Some(0)` for a BIT STRING.
+    Encapsulated {
+        unused_bits: Option<u8>,
+        items: Vec<Asn1>,
+    },
+    Bool(bool),
+    /// INTEGER or ENUMERATED; the value is `raw` (big-endian two's complement).
+    Int,
+    Null,
+    /// OBJECT IDENTIFIER or RELATIVE-OID in dotted form.
+    Oid(String),
+    /// A character string, decoded per its type.
+    Text(String),
+    /// UTCTime or GeneralizedTime; `iso` is set when the value is well formed.
+    Time {
+        text: String,
+        iso: Option<String>,
+    },
+    /// A BIT STRING that is not itself DER; the bits are `raw[1..]`.
+    BitString {
+        unused_bits: u8,
+    },
+    /// Anything else; the content is `raw`.
+    Bytes,
+}
+
+impl Asn1 {
+    /// Human-readable tag, e.g. `SEQUENCE`, `[0]`, `[APPLICATION 3]`.
+    pub fn tag_name(&self) -> String {
+        match self.class {
+            TagClass::Universal => match crate::der::universal_name(self.number) {
+                Some(n) => n.to_string(),
+                None => format!("[UNIVERSAL {}]", self.number),
+            },
+            TagClass::Application => format!("[APPLICATION {}]", self.number),
+            TagClass::Context => format!("[{}]", self.number),
+            TagClass::Private => format!("[PRIVATE {}]", self.number),
+        }
+    }
+
+    /// The element's payload: content bytes, minus the unused-bits byte for a
+    /// BIT STRING. `None` for constructed elements.
+    pub fn payload(&self) -> Option<Vec<u8>> {
+        if self.constructed {
+            return None;
+        }
+        match self.value {
+            Asn1Value::BitString { .. }
+            | Asn1Value::Encapsulated {
+                unused_bits: Some(_),
+                ..
+            } => Some(self.raw.get(1..).unwrap_or_default().to_vec()),
+            _ => Some(self.raw.clone()),
+        }
+    }
+
+    /// Child elements, for constructed or encapsulating elements.
+    pub fn children(&self) -> Option<&[Asn1]> {
+        match &self.value {
+            Asn1Value::Constructed(items) | Asn1Value::Encapsulated { items, .. } => Some(items),
+            _ => None,
         }
     }
 }

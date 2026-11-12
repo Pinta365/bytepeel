@@ -1,9 +1,9 @@
 //! Layer detection: decides what each buffer is and recurses.
 
 use crate::node::{Codec, Detail, Node};
-use crate::protobuf;
 use crate::text::{self, is_printable};
 use crate::{Diag, Force, InputForm, Options};
+use crate::{der, dump, protobuf};
 
 /// Minimum confidence for a text layer at the top level (beats "plain text").
 const TOP_THRESHOLD: f64 = 0.5;
@@ -44,10 +44,17 @@ pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
         }
         InputForm::Raw => finish(input, 0, opts),
         InputForm::Hex => {
-            let bytes = text::decode_hex(as_text(input)?)?;
+            let t = as_text(input)?;
+            let (codec, bytes) = match dump::decode_dump(t) {
+                Some(d) => {
+                    let d = d?;
+                    (Codec::Dump { style: d.style }, d.bytes)
+                }
+                None => (Codec::Hex, text::decode_hex(t)?),
+            };
             let child = finish(&bytes, 1, opts)?;
             let c = Cand {
-                codec: Codec::Hex,
+                codec,
                 decoded: bytes,
                 conf: 1.0,
                 warnings: vec![],
@@ -113,6 +120,11 @@ fn forced(buf: &[u8], depth: usize, opts: &Options, f: Force) -> Result<Node, Di
                 detail: Detail::Message { fields },
                 warnings: vec![],
             })
+        }
+        Force::Der => {
+            let mut st = der::Stats::default();
+            let items = der::parse(buf, &mut st)?;
+            Ok(der_node(buf.len(), items, &st))
         }
         Force::Text => {
             let t = std::str::from_utf8(buf).map_err(|e| {
@@ -183,6 +195,17 @@ fn best_layer(t: &str, nested: bool) -> Option<Cand> {
             },
         );
     }
+    if let Some(Ok(d)) = dump::decode_dump(t) {
+        keep(
+            &mut best,
+            Cand {
+                codec: Codec::Dump { style: d.style },
+                decoded: d.bytes,
+                conf: 0.98,
+                warnings: vec![],
+            },
+        );
+    }
     let core_len = t.trim().len();
     if !nested || core_len >= 8 {
         if let Some((bytes, conf)) = text::hex_candidate(t) {
@@ -229,6 +252,9 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
     if buf.is_empty() {
         return bytes_leaf(buf, 1.0, vec![]);
     }
+    if let Some((items, st)) = der::detect(buf) {
+        return der_node(buf.len(), items, &st);
+    }
     if let Some(format) = sniff(buf) {
         let w = Diag::new(
             "UNSUPPORTED_FORMAT",
@@ -262,24 +288,26 @@ fn sniff(buf: &[u8]) -> Option<&'static str> {
         [0x78, 0x01 | 0x5e | 0x9c | 0xda, ..] => Some("zlib"),
         [0x89, b'P', b'N', b'G', ..] => Some("png"),
         [b'P', b'K', 0x03, 0x04, ..] => Some("zip"),
-        [0x30, ..] if buf.len() >= 4 && der_len_matches(buf) => Some("DER/ASN.1"),
         _ => None,
     }
 }
 
-fn der_len_matches(buf: &[u8]) -> bool {
-    let b1 = buf[1] as usize;
-    if b1 < 0x80 {
-        return 2 + b1 == buf.len();
+fn der_node(len: usize, items: Vec<crate::Asn1>, st: &der::Stats) -> Node {
+    let mut warnings = vec![];
+    if st.noncanonical > 0 {
+        warnings.push(Diag::new(
+            "NONCANONICAL_DER",
+            "valid BER but not DER: non-minimal length or integer encoding",
+            None,
+        ));
     }
-    let n = b1 & 0x7f;
-    if n == 0 || n > 4 || buf.len() < 2 + n {
-        return false;
+    Node {
+        codec: Codec::Der,
+        range: [0, len],
+        confidence: der::confidence(st),
+        detail: Detail::Der { items },
+        warnings,
     }
-    let len = buf[2..2 + n]
-        .iter()
-        .fold(0usize, |a, &b| (a << 8) | b as usize);
-    2 + n + len == buf.len()
 }
 
 fn layer_node(c: Cand, input_len: usize, child: Node) -> Node {

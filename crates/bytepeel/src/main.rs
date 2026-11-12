@@ -11,10 +11,11 @@ USAGE:
 
 OPTIONS:
     --in <auto|hex|base64|raw>     How to read the input (default: auto)
-    --as <protobuf|text|bytes>     Force how the decoded bytes are interpreted
+    --as <protobuf|der|text|bytes> Force how the decoded bytes are interpreted
     --depth <N>                    Max nesting of layers and messages (default: 16)
     --alts <N>                     Max interpretations kept per LEN field (default: 3)
-    --get <PATH>                   Select one protobuf field, e.g. 1.3[2].4
+    --get <PATH>                   Select one protobuf field (field numbers, e.g. 1.3[2].4)
+                                   or DER element (0-based child indices, e.g. 0.0.6)
     --format <json|tree|raw>       Output format (default: json; raw needs --get)
     -h, --help                     Print help
     -V, --version                  Print version
@@ -98,11 +99,12 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             "--as" => {
                 args.opts.force = Some(match value()?.as_str() {
                     "protobuf" | "pb" => Force::Protobuf,
+                    "der" | "asn1" => Force::Der,
                     "text" => Force::Text,
                     "bytes" => Force::Bytes,
                     v => {
                         return Err(usage(format!(
-                            "unknown --as value '{v}' (expected protobuf|text|bytes)"
+                            "unknown --as value '{v}' (expected protobuf|der|text|bytes)"
                         )));
                     }
                 })
@@ -190,6 +192,27 @@ fn main() -> ExitCode {
 
     let mut out = io::stdout().lock();
     let res = match &args.get {
+        Some(path) if core::is_der(&node) => {
+            let e = match core::select_der(&node, path) {
+                Ok(e) => e,
+                Err(e) => return fail(&e, 1),
+            };
+            match args.format {
+                Format::Json => writeln!(out, "{}", core::asn1_to_json(e)),
+                Format::Tree => write!(out, "{}", core::asn1_to_tree(e)),
+                Format::Raw => match e.payload() {
+                    Some(b) => out.write_all(&b),
+                    None => {
+                        let e = Diag::new(
+                            "NO_PAYLOAD",
+                            "a constructed element has no single payload; use --format json",
+                            None,
+                        );
+                        return fail(&e, 1);
+                    }
+                },
+            }
+        }
         Some(path) => {
             let f = match core::select(&node, path) {
                 Ok(f) => f,

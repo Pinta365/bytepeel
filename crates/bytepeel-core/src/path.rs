@@ -1,7 +1,7 @@
 //! Field selection by path, e.g. `1.3[2].4`.
 
 use crate::Diag;
-use crate::node::{AltKind, Detail, Field, FieldValue, Node};
+use crate::node::{AltKind, Asn1, Detail, Field, FieldValue, Node};
 
 /// Select a protobuf field by path.
 ///
@@ -107,4 +107,75 @@ fn field_children(f: &Field) -> Option<&[Field]> {
         }),
         _ => None,
     }
+}
+
+/// Select a DER element by path.
+///
+/// Segments are 0-based child indices separated by `.`: the first indexes the
+/// top-level elements, so `0.0.6` is the subjectPublicKeyInfo of a certificate.
+/// Text layers are descended automatically, and BIT STRING / OCTET STRING
+/// elements with encapsulated DER are entered like constructed ones.
+pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
+    let segs = parse_indices(path)?;
+    let mut items = der_items(root)
+        .ok_or_else(|| Diag::new("PATH_NOT_MESSAGE", "the input did not decode to DER", None))?;
+    let mut cur: Option<&Asn1> = None;
+    for (i, &idx) in segs.iter().enumerate() {
+        if let Some(parent) = cur {
+            items = parent.children().ok_or_else(|| {
+                Diag::new(
+                    "PATH_NOT_MESSAGE",
+                    format!("element at '{}' has no children", join(&segs[..i])),
+                    None,
+                )
+            })?;
+        }
+        cur = Some(items.get(idx).ok_or_else(|| {
+            Diag::new(
+                "PATH_NOT_FOUND",
+                format!("no element '{}'", join(&segs[..=i])),
+                None,
+            )
+        })?);
+    }
+    Ok(cur.expect("path has at least one segment"))
+}
+
+/// True when `node` (after any text layers) is DER, so paths are element indices.
+pub fn is_der(node: &Node) -> bool {
+    der_items(node).is_some()
+}
+
+fn der_items(node: &Node) -> Option<&[Asn1]> {
+    match &node.detail {
+        Detail::Der { items } => Some(items),
+        Detail::Layer { child, .. } => der_items(child),
+        _ => None,
+    }
+}
+
+fn join(segs: &[usize]) -> String {
+    segs.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn parse_indices(p: &str) -> Result<Vec<usize>, Diag> {
+    if p.trim().is_empty() {
+        return Err(Diag::new("BAD_PATH", "empty path", None));
+    }
+    p.split('.')
+        .map(|seg| {
+            seg.parse::<usize>().map_err(|_| {
+                Diag::new(
+                    "BAD_PATH",
+                    format!(
+                        "invalid path segment '{seg}' (DER paths are child indices, e.g. 0.0.6)"
+                    ),
+                    None,
+                )
+            })
+        })
+        .collect()
 }

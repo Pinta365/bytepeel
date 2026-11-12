@@ -9,7 +9,10 @@ fn run(args: &[&str], stdin: &[u8]) -> (i32, Vec<u8>, String) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // The CLI may exit (e.g. on a usage error) before reading stdin.
+    if let Err(e) = child.stdin.take().unwrap().write_all(stdin) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     let out = child.wait_with_output().unwrap();
     (
         out.status.code().unwrap(),
@@ -71,4 +74,28 @@ fn missing_file_is_io_error() {
     let (code, _, err) = run(&["/nonexistent/bytepeel-test"], b"");
     assert_eq!(code, 2);
     assert!(err.contains(r#""code":"IO""#), "{err}");
+}
+
+#[test]
+fn der_get_and_raw() {
+    // SEQUENCE { INTEGER 5, OCTET STRING "hi" }
+    let (code, out, _) = run(
+        &["--get", "0.1", "--format", "raw"],
+        b"3007 020105 04026869",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out, b"hi");
+    let (code, out, _) = run(&["--get", "0.0"], b"3007 020105 04026869");
+    assert_eq!(code, 0);
+    assert!(String::from_utf8(out).unwrap().contains(r#""int":"5""#));
+    let (code, _, err) = run(&["--get", "0", "--format", "raw"], b"3007 020105 04026869");
+    assert_eq!(code, 1);
+    assert!(err.contains("NO_PAYLOAD"), "{err}");
+}
+
+#[test]
+fn forced_der_error() {
+    let (code, _, err) = run(&["--in", "hex", "--as", "der"], b"3080020105");
+    assert_eq!(code, 1);
+    assert!(err.contains(r#""code":"INDEFINITE_LENGTH","#), "{err}");
 }
