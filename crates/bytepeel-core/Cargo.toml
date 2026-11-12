@@ -1,0 +1,13 @@
+[package]
+name = "bytepeel-core"
+description = "Zero-dependency recursive decoder for encoded and binary data (hex, base64, PEM, schemaless protobuf) with confidence-ranked interpretations"
+keywords = ["protobuf", "base64", "decoder", "binary", "cli"]
+categories = ["encoding", "parser-implementations"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Intentionally empty: bytepeel-core is zero-dependency.
