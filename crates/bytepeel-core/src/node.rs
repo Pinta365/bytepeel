@@ -53,6 +53,8 @@ pub enum Codec {
     Der,
     /// CBOR (RFC 8949): a sequence of one or more [`Value`]s.
     Cbor,
+    /// MessagePack: a sequence of one or more [`Value`]s.
+    Msgpack,
     Utf8,
     Bytes,
 }
@@ -72,6 +74,7 @@ impl Codec {
             Codec::Protobuf => "protobuf",
             Codec::Der => "der",
             Codec::Cbor => "cbor",
+            Codec::Msgpack => "msgpack",
             Codec::Utf8 => "utf8",
             Codec::Bytes => "bytes",
         }
@@ -96,8 +99,8 @@ pub enum Detail {
     Message { fields: Vec<Field> },
     /// DER-encoded ASN.1: one or more top-level elements.
     Der { items: Vec<Asn1> },
-    /// CBOR: normally one top-level value; a sequence may have several when
-    /// forced with `--as cbor`.
+    /// CBOR or MessagePack: normally one top-level value; a sequence may have
+    /// several when forced with `--as cbor` / `--as msgpack`.
     Values { items: Vec<Value> },
     /// A JWT or a PEM bundle: one node per part (base64 segments, or PEM
     /// blocks). `times` is `Detail::Parts`' only JWT-specific field: the

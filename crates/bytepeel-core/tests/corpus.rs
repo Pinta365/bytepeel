@@ -126,6 +126,23 @@ fn values_of(n: &Node) -> &[Value] {
     }
 }
 
+fn msgpack_opts() -> Options {
+    Options {
+        input: InputForm::Raw,
+        force: Some(Force::Msgpack),
+        ..Options::default()
+    }
+}
+
+/// Parse `hex` as a forced MessagePack sequence.
+fn msgpack(hex: &str) -> Node {
+    peel(&h(hex), &msgpack_opts()).unwrap()
+}
+
+fn msgpack_bytes(bytes: &[u8]) -> Node {
+    peel(bytes, &msgpack_opts()).unwrap()
+}
+
 fn auto(input: &[u8]) -> Node {
     peel(input, &Options::default()).unwrap()
 }
@@ -1358,6 +1375,232 @@ fn cbor_select_value() {
     assert!(value_to_tree(v).starts_with("text [11..17] \"Alice\""));
 }
 
+// ------------------------------------------------------------ MessagePack
+
+#[test]
+fn msgpack_integers() {
+    for (hex, kind) in [
+        ("00", ValueKind::Uint(0)),
+        ("7f", ValueKind::Uint(127)),
+        ("ccff", ValueKind::Uint(255)),
+        ("cd0100", ValueKind::Uint(256)),
+        ("ce00010000", ValueKind::Uint(65536)),
+        ("cfffffffffffffffff", ValueKind::Uint(u64::MAX)),
+        ("ff", ValueKind::Nint(0)),                               // -1
+        ("e0", ValueKind::Nint(31)),                              // -32
+        ("d0ff", ValueKind::Nint(0)),                             // int8 -1
+        ("d080", ValueKind::Nint(127)),                           // int8 -128
+        ("d18000", ValueKind::Nint(32767)),                       // int16 min
+        ("d280000000", ValueKind::Nint(2147483647)),              // int32 min
+        ("d38000000000000000", ValueKind::Nint(i64::MAX as u64)), // int64 min
+        ("d37fffffffffffffff", ValueKind::Uint(i64::MAX as u64)), // int64 max
+    ] {
+        assert_eq!(values_of(&msgpack(hex))[0].kind, kind, "{hex}");
+    }
+    assert!(to_json(&msgpack("d38000000000000000")).contains(r#""value":"-9223372036854775808""#));
+    assert!(to_json(&msgpack("cfffffffffffffffff")).contains(r#""value":"18446744073709551615""#));
+}
+
+#[test]
+fn msgpack_floats_and_simple() {
+    match values_of(&msgpack("ca3fc00000"))[0].kind {
+        ValueKind::Float { value, width } => {
+            assert_eq!(value, 1.5);
+            assert_eq!(width, 32);
+        }
+        _ => panic!(),
+    }
+    match values_of(&msgpack("cb3ff8000000000000"))[0].kind {
+        ValueKind::Float { value, width } => {
+            assert_eq!(value, 1.5);
+            assert_eq!(width, 64);
+        }
+        _ => panic!(),
+    }
+    assert_eq!(values_of(&msgpack("c0"))[0].kind, ValueKind::Null);
+    assert_eq!(values_of(&msgpack("c2"))[0].kind, ValueKind::Bool(false));
+    assert_eq!(values_of(&msgpack("c3"))[0].kind, ValueKind::Bool(true));
+}
+
+#[test]
+fn msgpack_strings() {
+    assert_eq!(
+        values_of(&msgpack("a568656c6c6f"))[0].kind,
+        ValueKind::Text("hello".into())
+    );
+    assert_eq!(
+        values_of(&msgpack("d90568656c6c6f"))[0].kind,
+        ValueKind::Text("hello".into())
+    );
+    assert_eq!(
+        values_of(&msgpack("da000568656c6c6f"))[0].kind,
+        ValueKind::Text("hello".into())
+    );
+    // A string that is not valid UTF-8.
+    let e = peel(&h("d901ff"), &msgpack_opts()).unwrap_err();
+    assert_eq!((e.code, e.offset), ("MSGPACK_BAD_UTF8", Some(2)));
+}
+
+#[test]
+fn msgpack_bin_and_nested() {
+    assert_eq!(
+        values_of(&msgpack("c403010203"))[0].kind,
+        ValueKind::Bytes {
+            data: vec![1, 2, 3],
+            decoded: None
+        }
+    );
+    // A bin value whose bytes are DER is decoded once via nested detection.
+    match &values_of(&msgpack("c4053003020105"))[0].kind {
+        ValueKind::Bytes {
+            decoded: Some(d), ..
+        } => assert_eq!(d.codec, Codec::Der),
+        _ => panic!("bin should decode to DER"),
+    }
+}
+
+#[test]
+fn msgpack_arrays_and_maps() {
+    assert!(
+        matches!(values_of(&msgpack("93010203"))[0].kind, ValueKind::Array(ref x) if x.len() == 3)
+    );
+    assert!(
+        matches!(values_of(&msgpack("dc00020102"))[0].kind, ValueKind::Array(ref x) if x.len() == 2)
+    );
+    match &values_of(&msgpack("81a16101"))[0].kind {
+        ValueKind::Map(entries) => {
+            assert_eq!(entries[0].0.kind, ValueKind::Text("a".into()));
+            assert_eq!(entries[0].1.kind, ValueKind::Uint(1));
+        }
+        _ => panic!(),
+    }
+    assert!(
+        matches!(values_of(&msgpack("de0001a16101"))[0].kind, ValueKind::Map(ref e) if e.len() == 1)
+    );
+}
+
+#[test]
+fn msgpack_ext_and_timestamps() {
+    // Generic extensions of every width.
+    for (hex, ty, data) in [
+        ("d40500", 5i8, vec![0u8]),
+        ("d5050001", 5, vec![0, 1]),
+        ("d60500010203", 5, vec![0, 1, 2, 3]),
+        ("c70305010203", 5, vec![1, 2, 3]),
+        ("c8000305010203", 5, vec![1, 2, 3]),
+        ("c90000000305010203", 5, vec![1, 2, 3]),
+    ] {
+        assert_eq!(
+            values_of(&msgpack(hex))[0].kind,
+            ValueKind::Ext { type_: ty, data },
+            "{hex}"
+        );
+    }
+    assert!(to_json(&msgpack("c70305010203")).contains(r#""ext_type":5"#));
+
+    // ext type -1 with a non-timestamp length has no iso.
+    let j = to_json(&msgpack("d4ff00"));
+    assert!(
+        j.contains(r#""ext_type":-1"#) && !j.contains(r#""iso""#),
+        "{j}"
+    );
+
+    // timestamp 32: 2017-01-30T07:54:33Z.
+    let mut b = vec![0xd6, 0xff];
+    b.extend_from_slice(&1_485_762_873u32.to_be_bytes());
+    let j = to_json(&msgpack_bytes(&b));
+    assert!(j.contains(r#""iso":"2017-01-30T07:54:33Z""#), "{j}");
+
+    // timestamp 64: nanoseconds in the upper 30 bits.
+    let v = (123_456_789u64 << 34) | 1_485_762_873;
+    let mut b = vec![0xd7, 0xff];
+    b.extend_from_slice(&v.to_be_bytes());
+    let j = to_json(&msgpack_bytes(&b));
+    assert!(
+        j.contains(r#""iso":"2017-01-30T07:54:33.123456789Z""#),
+        "{j}"
+    );
+
+    // timestamp 96: nanoseconds + signed seconds, before 1970.
+    let mut b = vec![0xc7, 0x0c, 0xff];
+    b.extend_from_slice(&500_000_000u32.to_be_bytes());
+    b.extend_from_slice(&(-1i64).to_be_bytes());
+    let j = to_json(&msgpack_bytes(&b));
+    assert!(j.contains(r#""iso":"1969-12-31T23:59:59.5Z""#), "{j}");
+}
+
+#[test]
+fn msgpack_errors_and_bounds() {
+    assert_eq!(
+        peel(&h("c1"), &msgpack_opts()).unwrap_err().code,
+        "MSGPACK_RESERVED"
+    );
+    let e = peel(&h("c4030102"), &msgpack_opts()).unwrap_err();
+    assert_eq!((e.code, e.offset), ("MSGPACK_TRUNCATED", Some(0)));
+    // Huge declared lengths must fail fast, before any allocation.
+    for hex in ["ddffffffff", "dfffffffff", "c6ffffffff", "dbffffffff"] {
+        assert_eq!(
+            peel(&h(hex), &msgpack_opts()).unwrap_err().code,
+            "MSGPACK_TRUNCATED",
+            "{hex}"
+        );
+    }
+    // Nesting cap (101 arrays around one value).
+    let mut deep = vec![0x91u8; 101];
+    deep.push(0x00);
+    assert_eq!(
+        peel(&deep, &msgpack_opts()).unwrap_err().code,
+        "NESTING_TOO_DEEP"
+    );
+    // Forced, a sequence may hold several items.
+    assert_eq!(
+        values_of(&peel(&h("0001"), &msgpack_opts()).unwrap()).len(),
+        2
+    );
+}
+
+#[test]
+fn msgpack_detection() {
+    let n = auto(include_bytes!("fixtures/record.msgpack"));
+    assert_eq!(n.codec, Codec::Msgpack);
+    assert_eq!(n.confidence, 0.9);
+
+    // A MessagePack map with string keys is not CBOR.
+    assert_eq!(auto(&h("82a16101a162920102")).codec, Codec::Msgpack);
+    // A CBOR map with text keys is not MessagePack.
+    assert_eq!(auto(&h("a26161016162820203")).codec, Codec::Cbor);
+    // Plain protobuf is not mistaken for MessagePack.
+    assert_eq!(auto(&h("089601")).codec, Codec::Protobuf);
+
+    // A buffer that is valid as several codecs: CBOR wins the tie, and every
+    // other interpretation is named in one warning.
+    let n = auto(&h("8218001801"));
+    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(n.warnings.len(), 1);
+    assert_eq!(n.warnings[0].code, "AMBIGUOUS_FORMAT");
+    assert!(
+        n.warnings[0].message.contains("msgpack") && n.warnings[0].message.contains("protobuf"),
+        "{}",
+        n.warnings[0].message
+    );
+}
+
+#[test]
+fn msgpack_select_value() {
+    let n = auto(include_bytes!("fixtures/record.msgpack"));
+    assert!(is_values(&n));
+    assert_eq!(
+        select_value(&n, "name").unwrap().kind,
+        ValueKind::Text("Alice".into())
+    );
+    assert_eq!(
+        select_value(&n, "tags.1").unwrap().kind,
+        ValueKind::Text("b".into())
+    );
+    assert_eq!(select_value(&n, "id").unwrap().kind, ValueKind::Uint(42));
+    assert_eq!(select_value(&n, "nope").unwrap_err().code, "PATH_NOT_FOUND");
+}
+
 // ------------------------------------------------------------ JSON
 
 #[test]
@@ -1403,6 +1646,10 @@ fn json_is_valid_and_deterministic() {
         jwe_token().into_bytes(),
         b"a.b.c".to_vec(),
         include_bytes!("fixtures/record.cbor").to_vec(),
+        include_bytes!("fixtures/record.msgpack").to_vec(),
+        h("82a16101a162920102"),
+        h("8218001801"),
+        h("81a174c7037f010203"),
         h("83010203"),
         h("a26161016162820203"),
         h("5f42010243030405ff"),
@@ -1613,5 +1860,62 @@ fn cbor_tag24_chain_is_linear_and_bounded_by_depth() {
         );
         let levels = json.matches(r#""codec":"cbor""#).count();
         assert!(levels <= depth, "depth {depth} decoded {levels} levels");
+    }
+}
+
+#[test]
+fn ambiguous_chain_is_linear_and_bounded_by_depth() {
+    // Every level is a CBOR array(2) whose first element is a byte string
+    // holding a MessagePack bin whose content is the next level (plus a
+    // trailing 0). Both parsers reach the same nested region, so before
+    // candidate parsing was structural, nested detection ran once per parser
+    // per level and the work grew ~1.8x per level.
+    let mut item: Vec<u8> = vec![0x82, 0x01, 0x02]; // CBOR [1, 2] core
+    for _ in 0..48 {
+        let mut bin = Vec::new();
+        if item.len() <= 0xff {
+            bin.push(0xc4);
+            bin.push(item.len() as u8);
+        } else {
+            bin.push(0xc5);
+            bin.extend_from_slice(&(item.len() as u16).to_be_bytes());
+        }
+        bin.extend_from_slice(&item);
+
+        let mut level = vec![0x82];
+        if bin.len() <= 0xff {
+            level.push(0x58);
+            level.push(bin.len() as u8);
+        } else {
+            level.push(0x59);
+            level.extend_from_slice(&(bin.len() as u16).to_be_bytes());
+        }
+        level.extend_from_slice(&bin);
+        level.push(0x00);
+        item = level;
+    }
+    assert!(item.len() > 0xff, "the chain should need 2-byte lengths");
+
+    for depth in [16usize, 64] {
+        for force in [None, Some(Force::Cbor), Some(Force::Msgpack)] {
+            let opts = Options {
+                depth,
+                force,
+                input: InputForm::Raw,
+                ..Options::default()
+            };
+            let start = std::time::Instant::now();
+            let n = peel(&item, &opts).unwrap();
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(&n.codec, Codec::Cbor | Codec::Msgpack),
+                "depth {depth} force {force:?}: {}",
+                n.codec.name()
+            );
+            assert!(
+                elapsed.as_secs() < 2,
+                "depth {depth} force {force:?} took {elapsed:?}"
+            );
+        }
     }
 }

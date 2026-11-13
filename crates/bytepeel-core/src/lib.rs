@@ -24,6 +24,7 @@ mod dump;
 mod error;
 mod json;
 mod jwt;
+mod msgpack;
 mod node;
 mod path;
 mod protobuf;
@@ -59,6 +60,7 @@ pub enum Force {
     Protobuf,
     Der,
     Cbor,
+    Msgpack,
     Text,
     Bytes,
 }

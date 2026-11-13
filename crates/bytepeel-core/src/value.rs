@@ -36,6 +36,11 @@ pub enum ValueKind {
     Array(Vec<Value>),
     Map(Vec<(Value, Value)>),
     Tag(u64, Box<Value>),
+    /// A MessagePack extension: its signed type and raw data.
+    Ext {
+        type_: i8,
+        data: Vec<u8>,
+    },
 }
 
 impl Value {
@@ -73,6 +78,7 @@ pub(crate) fn type_name(k: &ValueKind) -> &'static str {
         ValueKind::Array(_) => "array",
         ValueKind::Map(_) => "map",
         ValueKind::Tag(..) => "tag",
+        ValueKind::Ext { .. } => "ext",
     }
 }
 
@@ -166,6 +172,51 @@ pub(crate) fn iso_utc(epoch: i64) -> String {
     let (h, mi, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// Epoch seconds plus nanoseconds to ISO-8601 UTC, trimming trailing zero
+/// digits from the fraction (so whole seconds get no fraction at all).
+pub(crate) fn iso_utc_nanos(secs: i64, nanos: u32) -> String {
+    let base = iso_utc(secs);
+    if nanos == 0 {
+        return base;
+    }
+    let frac = format!("{nanos:09}");
+    let frac = frac.trim_end_matches('0');
+    format!("{}.{}Z", &base[..base.len() - 1], frac)
+}
+
+/// A MessagePack timestamp extension (type -1) as ISO-8601 UTC.
+///
+/// Handles the 4-byte (seconds), 8-byte (30-bit nanoseconds + 34-bit seconds)
+/// and 12-byte (nanoseconds + signed seconds, for dates before 1970) forms.
+pub(crate) fn ext_iso(type_: i8, data: &[u8]) -> Option<String> {
+    if type_ != -1 {
+        return None;
+    }
+    let (secs, nanos) = match data.len() {
+        4 => (
+            i64::from(u32::from_be_bytes([data[0], data[1], data[2], data[3]])),
+            0,
+        ),
+        8 => {
+            let v = u64::from_be_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]);
+            ((v & 0x3_FFFF_FFFF) as i64, (v >> 34) as u32)
+        }
+        12 => (
+            i64::from_be_bytes([
+                data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+            ]),
+            u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+        ),
+        _ => return None,
+    };
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    Some(iso_utc_nanos(secs, nanos))
 }
 
 /// Days since 1970-01-01 -> (year, month, day).

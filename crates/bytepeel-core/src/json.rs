@@ -110,6 +110,14 @@ fn value(o: &mut String, v: &Value) {
             }
             o.push(']');
         }
+        ValueKind::Ext { type_, data } => {
+            let _ = write!(o, ",\"ext_type\":{type_}");
+            let _ = write!(o, ",\"len\":{}", data.len());
+            hex_kv(o, data);
+            if let Some(iso) = value::ext_iso(*type_, data) {
+                let _ = write!(o, ",\"iso\":\"{iso}\"");
+            }
+        }
         ValueKind::Tag(n, inner) => {
             let _ = write!(o, ",\"tag\":\"{n}\"");
             if let Some(name) = value::tag_name(*n) {

@@ -57,36 +57,53 @@ fn too_deep(at: usize) -> Diag {
     )
 }
 
-/// Parse `buf` as a CBOR sequence (one or more items) covering the whole buffer.
-pub(crate) fn parse_sequence(buf: &[u8], depth: usize, opts: &Options) -> Result<Vec<Value>, Diag> {
+/// Parse `buf` as a CBOR sequence (one or more items) covering the whole
+/// buffer. This is structural only: byte strings get `decoded: None`. Run
+/// [`crate::detect::enrich_values`] afterwards to fill nested nodes once.
+pub(crate) fn parse_sequence(buf: &[u8]) -> Result<Vec<Value>, Diag> {
     let mut pos = 0;
     let mut items = Vec::new();
     while pos < buf.len() {
-        items.push(parse_one(buf, &mut pos, depth, opts, 0)?);
+        items.push(parse_one(buf, &mut pos, 0)?);
     }
     Ok(items)
 }
 
 /// Auto-detection: a self-describe prefix, or exactly one item covering the
-/// whole buffer whose top level (after tags) is a map or array.
-pub(crate) fn detect(buf: &[u8], depth: usize, opts: &Options) -> Option<(Vec<Value>, f64)> {
+/// whole buffer whose top level (after tags) is a map or array. The `bool` is
+/// whether every map key is a text string (used for tie-breaking).
+pub(crate) fn detect(buf: &[u8]) -> Option<(Vec<Value>, f64, bool)> {
     if buf.len() < 2 {
         return None;
     }
     let self_describe = buf.len() >= 3 && buf[0] == 0xd9 && buf[1] == 0xd9 && buf[2] == 0xf7;
-    let items = parse_sequence(buf, depth, opts).ok()?;
+    let items = parse_sequence(buf).ok()?;
     if items.len() != 1 {
         return None;
     }
     if self_describe {
-        return Some((items, 0.99));
+        let text_keys = keys_all_text(&items[0]);
+        return Some((items, 0.99, text_keys));
     }
     match &items[0].untagged().kind {
         ValueKind::Map(_) | ValueKind::Array(_) => {
             let conf = if keys_are_simple(&items[0]) { 0.9 } else { 0.7 };
-            Some((items, conf))
+            let text_keys = keys_all_text(&items[0]);
+            Some((items, conf, text_keys))
         }
         _ => None,
+    }
+}
+
+/// Every map key anywhere in `v` is a text string.
+fn keys_all_text(v: &Value) -> bool {
+    match &v.kind {
+        ValueKind::Map(entries) => entries
+            .iter()
+            .all(|(k, val)| matches!(&k.untagged().kind, ValueKind::Text(_)) && keys_all_text(val)),
+        ValueKind::Array(items) => items.iter().all(keys_all_text),
+        ValueKind::Tag(_, inner) => keys_all_text(inner),
+        _ => true,
     }
 }
 
@@ -170,13 +187,7 @@ fn decode_uint(buf: &[u8], pos: &mut usize, at: usize, ai: u8) -> Result<u64, Di
     }
 }
 
-fn parse_one(
-    buf: &[u8],
-    pos: &mut usize,
-    depth: usize,
-    opts: &Options,
-    nest: usize,
-) -> Result<Value, Diag> {
+fn parse_one(buf: &[u8], pos: &mut usize, nest: usize) -> Result<Value, Diag> {
     if nest > MAX_NEST {
         return Err(too_deep(*pos));
     }
@@ -189,7 +200,7 @@ fn parse_one(
         0 => ValueKind::Uint(decode_uint(buf, pos, start, ai)?),
         1 => ValueKind::Nint(decode_uint(buf, pos, start, ai)?),
         2 => {
-            let (kind, ind) = parse_bytes(buf, pos, start, ai, depth, opts)?;
+            let (kind, ind) = parse_bytes(buf, pos, start, ai)?;
             indefinite = ind;
             kind
         }
@@ -199,25 +210,18 @@ fn parse_one(
             ValueKind::Text(text)
         }
         4 => {
-            let (items, ind) = parse_array(buf, pos, start, ai, depth, opts, nest)?;
+            let (items, ind) = parse_array(buf, pos, start, ai, nest)?;
             indefinite = ind;
             ValueKind::Array(items)
         }
         5 => {
-            let (entries, ind) = parse_map(buf, pos, start, ai, depth, opts, nest)?;
+            let (entries, ind) = parse_map(buf, pos, start, ai, nest)?;
             indefinite = ind;
             ValueKind::Map(entries)
         }
         6 => {
             let n = decode_uint(buf, pos, start, ai)?;
-            // Tag 24 is embedded CBOR: decode the byte string as CBOR only.
-            // Parsing it once (not also with normal nested detection) keeps
-            // chains of tag 24 linear instead of doubling per level.
-            let inner = if n == 24 && buf.get(*pos).is_some_and(|h| h >> 5 == 2) {
-                parse_embedded(buf, pos, depth, opts, nest + 1)?
-            } else {
-                parse_one(buf, pos, depth, opts, nest + 1)?
-            };
+            let inner = parse_one(buf, pos, nest + 1)?;
             ValueKind::Tag(n, Box::new(inner))
         }
         _ => parse_simple(buf, pos, start, ai)?,
@@ -229,43 +233,22 @@ fn parse_one(
     })
 }
 
+/// A byte string, structurally: any nested `decoded` node is filled later by
+/// [`crate::detect::enrich_values`].
 fn parse_bytes(
     buf: &[u8],
     pos: &mut usize,
     start: usize,
     ai: u8,
-    depth: usize,
-    opts: &Options,
 ) -> Result<(ValueKind, bool), Diag> {
     let (data, indefinite) = read_bytes(buf, pos, start, ai)?;
-    let decoded = detect::nested_bytes(&data, depth + 1, opts).map(Box::new);
-    Ok((ValueKind::Bytes { data, decoded }, indefinite))
-}
-
-/// The byte string after tag 24: decoded as CBOR (within `--depth`) or not at all.
-fn parse_embedded(
-    buf: &[u8],
-    pos: &mut usize,
-    depth: usize,
-    opts: &Options,
-    nest: usize,
-) -> Result<Value, Diag> {
-    if nest > MAX_NEST {
-        return Err(too_deep(*pos));
-    }
-    let start = *pos;
-    let ai = read_u8(buf, pos, start)? & 0x1f;
-    let (data, indefinite) = read_bytes(buf, pos, start, ai)?;
-    let decoded = if depth + 1 < opts.depth {
-        embedded_cbor(&data, depth + 1, opts).map(Box::new)
-    } else {
-        None
-    };
-    Ok(Value {
-        range: [start, *pos],
-        kind: ValueKind::Bytes { data, decoded },
+    Ok((
+        ValueKind::Bytes {
+            data,
+            decoded: None,
+        },
         indefinite,
-    })
+    ))
 }
 
 /// A byte string's content (chunks concatenated) and whether it was indefinite.
@@ -335,8 +318,6 @@ fn parse_array(
     pos: &mut usize,
     start: usize,
     ai: u8,
-    depth: usize,
-    opts: &Options,
     nest: usize,
 ) -> Result<(Vec<Value>, bool), Diag> {
     let mut items = Vec::new();
@@ -348,7 +329,7 @@ fn parse_array(
                 return Ok((items, true));
             }
             *pos = peek;
-            items.push(parse_one(buf, pos, depth, opts, nest + 1)?);
+            items.push(parse_one(buf, pos, nest + 1)?);
         }
     } else {
         let n = definite_len(buf, pos, start, ai)?;
@@ -356,7 +337,7 @@ fn parse_array(
             return Err(truncated(start));
         }
         for _ in 0..n {
-            items.push(parse_one(buf, pos, depth, opts, nest + 1)?);
+            items.push(parse_one(buf, pos, nest + 1)?);
         }
         Ok((items, false))
     }
@@ -367,8 +348,6 @@ fn parse_map(
     pos: &mut usize,
     start: usize,
     ai: u8,
-    depth: usize,
-    opts: &Options,
     nest: usize,
 ) -> Result<(Vec<(Value, Value)>, bool), Diag> {
     let mut entries = Vec::new();
@@ -380,8 +359,8 @@ fn parse_map(
                 return Ok((entries, true));
             }
             *pos = peek;
-            let k = parse_one(buf, pos, depth, opts, nest + 1)?;
-            let v = parse_one(buf, pos, depth, opts, nest + 1)?;
+            let k = parse_one(buf, pos, nest + 1)?;
+            let v = parse_one(buf, pos, nest + 1)?;
             entries.push((k, v));
         }
     } else {
@@ -390,8 +369,8 @@ fn parse_map(
             return Err(truncated(start));
         }
         for _ in 0..n {
-            let k = parse_one(buf, pos, depth, opts, nest + 1)?;
-            let v = parse_one(buf, pos, depth, opts, nest + 1)?;
+            let k = parse_one(buf, pos, nest + 1)?;
+            let v = parse_one(buf, pos, nest + 1)?;
             entries.push((k, v));
         }
         Ok((entries, false))
@@ -429,12 +408,20 @@ fn parse_simple(buf: &[u8], pos: &mut usize, start: usize, ai: u8) -> Result<Val
     })
 }
 
-fn embedded_cbor(data: &[u8], depth: usize, opts: &Options) -> Option<Node> {
-    let items = parse_sequence(data, depth, opts).ok()?;
+/// Decode a tag-24 byte-string payload as CBOR only, bounded by `--depth`.
+///
+/// `depth` is the payload buffer's own depth; its byte strings are then one
+/// level deeper. Nested detection runs once, during enrichment.
+pub(crate) fn embedded(buf: &[u8], depth: usize, opts: &Options) -> Option<Node> {
+    if depth >= opts.depth {
+        return None;
+    }
+    let mut items = parse_sequence(buf).ok()?;
     if items.is_empty() {
         return None;
     }
-    Some(node(items, 1.0, data.len()))
+    detect::enrich_values(&mut items, depth, opts);
+    Some(node(items, 1.0, buf.len()))
 }
 
 /// IEEE 754 half-precision to double.

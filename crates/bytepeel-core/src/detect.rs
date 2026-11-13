@@ -3,8 +3,10 @@
 use crate::cbor;
 use crate::compress::{self, Outcome};
 use crate::jwt;
+use crate::msgpack;
 use crate::node::{Alphabet, Codec, Detail, Node};
 use crate::text::{self, is_printable};
+use crate::value::{Value, ValueKind};
 use crate::{Diag, Force, InputForm, Options};
 use crate::{der, dump, protobuf};
 
@@ -142,8 +144,14 @@ fn forced(buf: &[u8], depth: usize, opts: &Options, f: Force) -> Result<Node, Di
             Ok(der_node(buf.len(), items, &st))
         }
         Force::Cbor => {
-            let items = cbor::parse_sequence(buf, depth, opts)?;
+            let mut items = cbor::parse_sequence(buf)?;
+            enrich_values(&mut items, depth, opts);
             Ok(cbor::node(items, 1.0, buf.len()))
+        }
+        Force::Msgpack => {
+            let mut items = msgpack::parse_sequence(buf)?;
+            enrich_values(&mut items, depth, opts);
+            Ok(msgpack::node(items, 1.0, buf.len()))
         }
         Force::Text => {
             let t = std::str::from_utf8(buf).map_err(|e| {
@@ -200,6 +208,44 @@ pub(crate) fn nested_bytes(buf: &[u8], depth: usize, opts: &Options) -> Option<N
     match n.codec {
         Codec::Utf8 | Codec::Bytes => None,
         _ => Some(n),
+    }
+}
+
+/// Fill the `decoded` node of every byte string in a structurally parsed CBOR
+/// or MessagePack tree, in one pass.
+///
+/// `depth` is the depth of the buffer these values were parsed from, so their
+/// byte-string contents are one level deeper. Running this only on the winning
+/// candidate is what keeps candidate parsing structural and linear.
+pub(crate) fn enrich_values(items: &mut [Value], depth: usize, opts: &Options) {
+    for v in items {
+        enrich_value(v, depth, opts);
+    }
+}
+
+fn enrich_value(v: &mut Value, depth: usize, opts: &Options) {
+    match &mut v.kind {
+        ValueKind::Bytes { data, decoded } => {
+            *decoded = nested_bytes(data, depth + 1, opts).map(Box::new);
+        }
+        ValueKind::Array(items) => enrich_values(items, depth, opts),
+        ValueKind::Map(entries) => {
+            for (k, val) in entries.iter_mut() {
+                enrich_value(k, depth, opts);
+                enrich_value(val, depth, opts);
+            }
+        }
+        // Tag 24 is embedded CBOR: decode it as CBOR only, never with the
+        // general (multi-codec) nested detection.
+        ValueKind::Tag(24, inner) => {
+            if let ValueKind::Bytes { data, decoded } = &mut inner.kind {
+                *decoded = cbor::embedded(data, depth + 1, opts).map(Box::new);
+            } else {
+                enrich_value(inner, depth, opts);
+            }
+        }
+        ValueKind::Tag(_, inner) => enrich_value(inner, depth, opts),
+        _ => {}
     }
 }
 
@@ -422,38 +468,80 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
         );
         return bytes_leaf(buf, 0.9, vec![w]);
     }
-    // CBOR competes with protobuf; never resolve the tie silently.
-    let cbor_cand = if depth < opts.depth {
-        cbor::detect(buf, depth, opts)
-    } else {
-        None
-    };
-    let pb_cand = if depth < opts.depth {
-        protobuf::parse_message(buf, 0, buf.len(), depth, opts)
-            .ok()
-            .map(|(fields, st)| {
-                let p = protobuf::plausibility(&st, buf.len());
-                (fields, p)
-            })
-            .filter(|(_, p)| *p >= MESSAGE_THRESHOLD)
-    } else {
-        None
-    };
-    match (cbor_cand, pb_cand) {
-        (Some((items, cconf)), Some((fields, pconf))) => {
-            if pconf > cconf {
-                let mut n = protobuf_node(fields, pconf, buf.len());
-                n.warnings.push(ambiguous_format("cbor", cconf));
-                n
-            } else {
-                let mut n = cbor::node(items, cconf, buf.len());
-                n.warnings.push(ambiguous_format("protobuf", pconf));
-                n
+    // CBOR, MessagePack and protobuf all compete; never resolve a tie silently.
+    let mut cands: Vec<Cand3> = Vec::new();
+    if depth < opts.depth {
+        if let Some((items, conf, text_keys)) = cbor::detect(buf) {
+            cands.push(Cand3 {
+                rank: 0,
+                conf,
+                text_keys,
+                node: cbor::node(items, conf, buf.len()),
+            });
+        }
+        if let Some((items, conf, text_keys)) = msgpack::detect(buf) {
+            cands.push(Cand3 {
+                rank: 1,
+                conf,
+                text_keys,
+                node: msgpack::node(items, conf, buf.len()),
+            });
+        }
+        if let Ok((fields, st)) = protobuf::parse_message(buf, 0, buf.len(), depth, opts) {
+            let p = protobuf::plausibility(&st, buf.len());
+            if p >= MESSAGE_THRESHOLD {
+                cands.push(Cand3 {
+                    rank: 2,
+                    conf: p,
+                    text_keys: false,
+                    node: protobuf_node(fields, p, buf.len()),
+                });
             }
         }
-        (Some((items, cconf)), None) => cbor::node(items, cconf, buf.len()),
-        (None, Some((fields, pconf))) => protobuf_node(fields, pconf, buf.len()),
-        (None, None) => bytes_leaf(buf, 0.5, vec![]),
+    }
+    if cands.is_empty() {
+        return bytes_leaf(buf, 0.5, vec![]);
+    }
+    // Highest confidence wins; on a tie prefer all-text map keys, then CBOR,
+    // then MessagePack, then protobuf.
+    cands.sort_by(|a, b| {
+        b.conf
+            .total_cmp(&a.conf)
+            .then(b.text_keys.cmp(&a.text_keys))
+            .then(a.rank.cmp(&b.rank))
+    });
+    let mut best = cands.remove(0);
+    if !cands.is_empty() {
+        let mut msg = String::from("also parses as ");
+        for (i, c) in cands.iter().enumerate() {
+            if i > 0 {
+                msg.push_str(", ");
+            }
+            msg.push_str(&format!("{} ({:.2})", value_codec_name(c.rank), c.conf));
+        }
+        best.node
+            .warnings
+            .push(Diag::new("AMBIGUOUS_FORMAT", msg, None));
+    }
+    // Nested detection runs once, on the winner only.
+    if let Detail::Values { items } = &mut best.node.detail {
+        enrich_values(items, depth, opts);
+    }
+    best.node
+}
+
+struct Cand3 {
+    rank: u8,
+    conf: f64,
+    text_keys: bool,
+    node: Node,
+}
+
+fn value_codec_name(rank: u8) -> &'static str {
+    match rank {
+        0 => "cbor",
+        1 => "msgpack",
+        _ => "protobuf",
     }
 }
 
@@ -465,14 +553,6 @@ fn protobuf_node(fields: Vec<crate::Field>, conf: f64, len: usize) -> Node {
         detail: Detail::Message { fields },
         warnings: vec![],
     }
-}
-
-fn ambiguous_format(other: &str, conf: f64) -> Diag {
-    Diag::new(
-        "AMBIGUOUS_FORMAT",
-        format!("also parses as {other} (confidence {conf:.2})"),
-        None,
-    )
 }
 
 /// Recognize formats by magic bytes so they are not misread as protobuf.

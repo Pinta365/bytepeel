@@ -84,6 +84,14 @@ fn value(o: &mut String, v: &Value, d: usize) {
                 value(o, val, d + 2);
             }
         }
+        ValueKind::Ext { type_, data } => {
+            let _ = write!(o, " type={type_} len={} ", data.len());
+            hex_preview(o, data);
+            if let Some(iso) = value::ext_iso(*type_, data) {
+                let _ = write!(o, " iso={iso}");
+            }
+            o.push('\n');
+        }
         ValueKind::Tag(n, inner) => {
             let _ = write!(o, " {n}");
             if let Some(name) = value::tag_name(*n) {
