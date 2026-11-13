@@ -7,10 +7,10 @@
 //! encodings elsewhere. The result is decoded again and checked before it is
 //! returned.
 
-use crate::node::{AltKind, Codec, Detail, Field, FieldValue, Node};
+use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass};
 use crate::path::{message_fields, parse_path};
 use crate::value::{Value, ValueKind};
-use crate::{Diag, Options, cbor, compress, encode_value, msgpack, reencode, text, varint};
+use crate::{Diag, Options, cbor, compress, der, encode_value, msgpack, reencode, text, varint};
 
 /// A new value for a field, parsed from the CLI syntax (see [`parse_value`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +153,9 @@ pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result
     if crate::is_values(&root) {
         return set_value(&root, input, opts, path, value);
     }
+    if crate::is_der(&root) {
+        return set_der(&root, input, opts, path, value);
+    }
     // Validates the path and gives the same errors as --get.
     let target = crate::select(&root, path)?;
     let expected = encode_payload(target, value)?;
@@ -251,6 +254,9 @@ enum Edit<'a> {
     Field(&'a [(u32, usize)], &'a NewValue),
     /// A CBOR/MessagePack value by `--get` path, and its new encoded item.
     Value(&'a str, &'a [u8]),
+    /// A DER element by child-index path (the first index picks a PEM
+    /// bundle's block), and its new encoded element.
+    Der(&'a [usize], &'a [u8]),
 }
 
 fn verify_failed(why: &str) -> Diag {
@@ -283,6 +289,24 @@ fn rebuild(node: &Node, buf: &[u8], edit: &Edit<'_>) -> Result<Vec<u8>, Diag> {
             out.extend_from_slice(item);
             out.extend_from_slice(&buf[e..]);
             Ok(out)
+        }
+        (Detail::Der { items }, Edit::Der(segs, elem)) => {
+            let mut out = Vec::with_capacity(buf.len() + elem.len());
+            der_splice(buf, [0, buf.len()], items, segs, elem, &mut out);
+            Ok(out)
+        }
+        (Detail::Parts { parts, .. }, Edit::Der(segs, elem)) if node.codec == Codec::Bundle => {
+            // The first index picks the block; only that block is re-encoded.
+            let part = &parts[segs[0]];
+            let (Codec::Pem { label }, Detail::Layer { decoded, child }) =
+                (&part.codec, &part.detail)
+            else {
+                return Err(unsupported("a bundle part is not a PEM block"));
+            };
+            let der = rebuild(child, decoded, &Edit::Der(&segs[1..], elem))?;
+            let t = std::str::from_utf8(buf)
+                .map_err(|_| unsupported("the bundle's original text is not UTF-8"))?;
+            Ok(reencode::pem_like(t, part.range, label, &der)?.into_bytes())
         }
         (Detail::Layer { decoded, child }, _) => {
             let inner = rebuild(child, decoded, edit)?;
@@ -472,6 +496,355 @@ fn encode_payload(f: &Field, v: &NewValue) -> Result<Vec<u8>, Diag> {
         )),
         (FieldValue::Group { .. }, _) => Err(mismatch(f, "set one of its fields instead")),
     }
+}
+
+// ---------------------------------------------------------------- DER
+
+/// `set` on DER. The element keeps its tag; its content is encoded for its
+/// type, and the length of every enclosing element (including encapsulating
+/// BIT/OCTET STRINGs) is rewritten.
+fn set_der(
+    root: &Node,
+    input: &[u8],
+    opts: &Options,
+    path: &str,
+    value: &NewValue,
+) -> Result<Vec<u8>, Diag> {
+    let target = crate::select_der(root, path)?;
+    let content = der_content(target, value)?;
+    let mut elem = der_tag_bytes(target, input_for(root, input, target)).to_vec();
+    elem.extend_from_slice(&der_length(content.len()));
+    elem.extend_from_slice(&content);
+    let segs: Vec<usize> = path
+        .split('.')
+        .map(|p| p.parse().expect("validated by select_der"))
+        .collect();
+    let out = rebuild(root, input, &Edit::Der(&segs, &elem))?;
+
+    let again = crate::peel(&out, opts)
+        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
+    if !crate::is_der(&again) {
+        return Err(verify_failed("the data no longer decodes as DER"));
+    }
+    let got = crate::select_der(&again, path)
+        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
+    let bit_string = target.class == TagClass::Universal && target.number == 3;
+    let expected = if bit_string {
+        &content[1..]
+    } else {
+        &content[..]
+    };
+    if (got.class, got.number, got.constructed) != (target.class, target.number, false)
+        || got.payload().as_deref() != Some(expected)
+    {
+        return Err(verify_failed("the element does not hold the new value"));
+    }
+    Ok(out)
+}
+
+/// The DER buffer `target` was parsed from: the decoded bytes of the layer
+/// (or bundle block) that holds it. Element ranges index into this buffer.
+fn input_for<'a>(node: &'a Node, buf: &'a [u8], target: &Asn1) -> &'a [u8] {
+    match &node.detail {
+        Detail::Der { .. } => buf,
+        Detail::Layer { decoded, child } => input_for(child, decoded, target),
+        Detail::Parts { parts, .. } => {
+            // The block whose DER contains `target` (by identity).
+            for p in parts {
+                if let Detail::Layer { decoded, child } = &p.detail {
+                    if contains(child, target) {
+                        return input_for(child, decoded, target);
+                    }
+                }
+            }
+            buf
+        }
+        _ => buf,
+    }
+}
+
+fn contains(node: &Node, target: &Asn1) -> bool {
+    fn walk(items: &[Asn1], t: &Asn1) -> bool {
+        items
+            .iter()
+            .any(|e| std::ptr::eq(e, t) || e.children().is_some_and(|c| walk(c, t)))
+    }
+    match &node.detail {
+        Detail::Der { items } => walk(items, target),
+        Detail::Layer { child, .. } => contains(child, target),
+        _ => false,
+    }
+}
+
+/// The identifier octets of `e` (its tag, including high-tag-number form).
+fn der_tag_bytes<'a>(e: &Asn1, buf: &'a [u8]) -> &'a [u8] {
+    let s = e.range[0];
+    let mut n = 1;
+    if buf[s] & 0x1f == 0x1f {
+        while buf[s + n] & 0x80 != 0 {
+            n += 1;
+        }
+        n += 1;
+    }
+    &buf[s..s + n]
+}
+
+/// A minimal DER length.
+fn der_length(n: usize) -> Vec<u8> {
+    if n < 0x80 {
+        return vec![n as u8];
+    }
+    let bytes = (n as u64).to_be_bytes();
+    let skip = bytes.iter().take_while(|&&b| b == 0).count();
+    let mut out = vec![0x80 | (8 - skip) as u8];
+    out.extend_from_slice(&bytes[skip..]);
+    out
+}
+
+/// Copy `buf[region]` to `out`, replacing the element at `segs` with `elem`
+/// and re-encoding the length of every element on the way down.
+fn der_splice(
+    buf: &[u8],
+    region: [usize; 2],
+    items: &[Asn1],
+    segs: &[usize],
+    elem: &[u8],
+    out: &mut Vec<u8>,
+) {
+    let e = &items[segs[0]];
+    out.extend_from_slice(&buf[region[0]..e.range[0]]);
+    if segs.len() == 1 {
+        out.extend_from_slice(elem);
+    } else {
+        let children = e.children().expect("validated by select_der");
+        let [cs, ce] = e.content;
+        // An encapsulating BIT STRING keeps its unused-bits byte.
+        let prefix = matches!(
+            e.value,
+            Asn1Value::Encapsulated {
+                unused_bits: Some(_),
+                ..
+            }
+        );
+        let mut content = Vec::new();
+        if prefix {
+            content.push(buf[cs]);
+        }
+        let start = if prefix { cs + 1 } else { cs };
+        der_splice(buf, [start, ce], children, &segs[1..], elem, &mut content);
+        out.extend_from_slice(der_tag_bytes(e, buf));
+        out.extend_from_slice(&der_length(content.len()));
+        out.extend_from_slice(&content);
+    }
+    out.extend_from_slice(&buf[e.range[1]..region[1]]);
+}
+
+fn der_mismatch(e: &Asn1, hint: &str) -> Diag {
+    Diag::new(
+        "TYPE_MISMATCH",
+        format!("element is {}; {hint}", e.tag_name()),
+        None,
+    )
+}
+
+/// The new content octets for `e`, encoded for its type. `hex:`/`b64:` set
+/// the content verbatim (for a BIT STRING: the bits, with 0 unused bits).
+fn der_content(e: &Asn1, v: &NewValue) -> Result<Vec<u8>, Diag> {
+    if e.constructed {
+        return Err(der_mismatch(e, "set one of its children instead"));
+    }
+    let universal = e.class == TagClass::Universal;
+    if let NewValue::Bytes(b) = v {
+        return Ok(if universal && e.number == 3 {
+            let mut c = vec![0];
+            c.extend_from_slice(b);
+            c
+        } else {
+            b.clone()
+        });
+    }
+    if !universal {
+        // Context/application/private primitives are untyped: text only.
+        return match v {
+            NewValue::Str(s) => Ok(s.as_bytes().to_vec()),
+            _ => Err(der_mismatch(e, "use \"text\", hex:.. or b64:..")),
+        };
+    }
+    let text_only = |check: fn(char) -> bool, what: &str| -> Result<Vec<u8>, Diag> {
+        match v {
+            NewValue::Str(s) => match s.chars().find(|&c| !check(c)) {
+                None => Ok(s.as_bytes().to_vec()),
+                Some(c) => Err(Diag::new(
+                    "VALUE_OUT_OF_RANGE",
+                    format!("{c:?} is not allowed in a {what}"),
+                    None,
+                )),
+            },
+            _ => Err(der_mismatch(e, "use \"text\"")),
+        }
+    };
+    match (e.number, v) {
+        (1, NewValue::Bool(b)) => Ok(vec![if *b { 0xff } else { 0 }]),
+        (1, _) => Err(der_mismatch(e, "use true or false")),
+        (2 | 10, NewValue::Int(n)) => Ok(der_int(*n)),
+        (2 | 10, _) => Err(der_mismatch(
+            e,
+            "use an integer, or hex:.. for wider values",
+        )),
+        (5, NewValue::Null) => Ok(vec![]),
+        (5, _) => Err(der_mismatch(e, "use null")),
+        (6, NewValue::Str(s)) => der_oid(s).ok_or_else(|| {
+            Diag::new(
+                "BAD_VALUE",
+                format!("'{s}' is not a dotted OID (e.g. \"2.5.4.3\")"),
+                None,
+            )
+        }),
+        (6, _) => Err(der_mismatch(e, "use a dotted OID string, e.g. \"2.5.4.3\"")),
+        (23 | 24, NewValue::Str(s)) => der_time(s, e.number == 23),
+        (23 | 24, _) => Err(der_mismatch(
+            e,
+            "use a time string, e.g. \"2030-01-01T00:00:00Z\"",
+        )),
+        (4 | 12, NewValue::Str(s)) => Ok(s.as_bytes().to_vec()),
+        (18, _) => text_only(|c| c.is_ascii_digit() || c == ' ', "NumericString"),
+        (19, _) => text_only(
+            |c| c.is_ascii_alphanumeric() || " '()+,-./:=?".contains(c),
+            "PrintableString",
+        ),
+        (22, _) => text_only(|c| c.is_ascii(), "IA5String"),
+        (26, _) => text_only(|c| (' '..='~').contains(&c), "VisibleString"),
+        (25 | 27, _) => text_only(|_| true, "string"),
+        (20 | 21, NewValue::Str(s)) => s
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).ok())
+            .collect::<Option<Vec<u8>>>()
+            .ok_or_else(|| {
+                Diag::new(
+                    "VALUE_OUT_OF_RANGE",
+                    "T61/Videotex strings hold Latin-1 only",
+                    None,
+                )
+            }),
+        (30, NewValue::Str(s)) => {
+            if s.chars().any(|c| u32::from(c) > 0xffff) {
+                return Err(Diag::new(
+                    "VALUE_OUT_OF_RANGE",
+                    "a BMPString holds only U+0000..U+FFFF",
+                    None,
+                ));
+            }
+            Ok(s.encode_utf16().flat_map(u16::to_be_bytes).collect())
+        }
+        (28, NewValue::Str(s)) => Ok(s.chars().flat_map(|c| u32::from(c).to_be_bytes()).collect()),
+        _ => Err(der_mismatch(
+            e,
+            "use hex:.. or b64:.. to set its content bytes",
+        )),
+    }
+}
+
+/// Minimal two's complement, big-endian.
+fn der_int(n: i128) -> Vec<u8> {
+    let b = n.to_be_bytes();
+    let mut i = 0;
+    while i < 15 && ((b[i] == 0 && b[i + 1] & 0x80 == 0) || (b[i] == 0xff && b[i + 1] & 0x80 != 0))
+    {
+        i += 1;
+    }
+    b[i..].to_vec()
+}
+
+fn der_oid(s: &str) -> Option<Vec<u8>> {
+    let arcs: Vec<u128> = s
+        .split('.')
+        .map(|a| a.parse().ok())
+        .collect::<Option<_>>()?;
+    if arcs.len() < 2 || arcs[0] > 2 || (arcs[0] < 2 && arcs[1] >= 40) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let first = arcs[0].checked_mul(40)?.checked_add(arcs[1])?;
+    for a in std::iter::once(first).chain(arcs[2..].iter().copied()) {
+        let mut chunk = vec![(a & 0x7f) as u8];
+        let mut v = a >> 7;
+        while v > 0 {
+            chunk.push(0x80 | (v & 0x7f) as u8);
+            v >>= 7;
+        }
+        chunk.reverse();
+        out.extend_from_slice(&chunk);
+    }
+    Some(out)
+}
+
+/// A UTCTime/GeneralizedTime from its own form or from ISO 8601
+/// (`2030-01-01T00:00:00Z`, `...T00:00:00.5+02:00`).
+fn der_time(s: &str, utc: bool) -> Result<Vec<u8>, Diag> {
+    if der::time_iso(s, utc).is_some() {
+        return Ok(s.as_bytes().to_vec());
+    }
+    let bad = || {
+        Diag::new(
+            "BAD_VALUE",
+            format!("'{s}' is not a time; use e.g. \"2030-01-01T00:00:00Z\""),
+            None,
+        )
+    };
+    let b = s.as_bytes();
+    if !s.is_ascii()
+        || b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return Err(bad());
+    }
+    let (date, time) = (&s[..10], &s[11..19]);
+    let mut rest = &s[19..];
+    let mut frac = "";
+    if let Some(r) = rest.strip_prefix('.') {
+        let n = r.bytes().take_while(u8::is_ascii_digit).count();
+        frac = &rest[..1 + n];
+        rest = &r[n..];
+    }
+    let zone = match rest {
+        "Z" => "Z".to_string(),
+        z if z.len() == 6 && (z.starts_with('+') || z.starts_with('-')) && &z[3..4] == ":" => {
+            format!("{}{}", &z[..3], &z[4..])
+        }
+        _ => return Err(bad()),
+    };
+    let digits: String = format!("{date}{time}")
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    let raw = if utc {
+        if !frac.is_empty() {
+            return Err(Diag::new(
+                "VALUE_OUT_OF_RANGE",
+                "UTCTime has no fractional seconds",
+                None,
+            ));
+        }
+        let year: u32 = digits[..4].parse().map_err(|_| bad())?;
+        if !(1950..=2049).contains(&year) {
+            return Err(Diag::new(
+                "VALUE_OUT_OF_RANGE",
+                "UTCTime covers the years 1950-2049",
+                None,
+            ));
+        }
+        format!("{}{zone}", &digits[2..])
+    } else {
+        format!("{digits}{frac}{zone}")
+    };
+    if der::time_iso(&raw, utc).is_none() {
+        return Err(bad());
+    }
+    Ok(raw.into_bytes())
 }
 
 #[cfg(test)]

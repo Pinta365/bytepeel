@@ -3,7 +3,9 @@
 //! verifies this itself, so an Ok result is re-checked here independently).
 #![no_main]
 
-use bytepeel_core::{Options, is_values, parse_value, peel, select, select_value, set};
+use bytepeel_core::{
+    Options, is_der, is_values, parse_value, peel, select, select_der, select_value, set,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -21,6 +23,8 @@ fuzz_target!(|data: &[u8]| {
         // The same dispatch as the CLI: value trees use value paths.
         let found = if is_values(&n) {
             select_value(&n, path).is_ok()
+        } else if is_der(&n) {
+            select_der(&n, path).is_ok()
         } else {
             select(&n, path).is_ok()
         };

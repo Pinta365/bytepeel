@@ -413,3 +413,159 @@ fn value_edit_that_changes_detection_is_caught() {
     let out = setv(&amb, &cbor_opts(), "1", "5").unwrap();
     assert_eq!(out, h("82 18 00 05"));
 }
+
+// ------------------------------------------------------------ DER
+
+const ISRG_X2: &str = include_str!("fixtures/isrg-root-x2.pem");
+
+fn der_opts() -> Options {
+    Options {
+        input: InputForm::Raw,
+        force: Some(Force::Der),
+        ..Options::default()
+    }
+}
+
+fn el<'a>(n: &'a Node, path: &str) -> &'a Asn1 {
+    select_der(n, path).unwrap()
+}
+
+#[test]
+fn der_integer_grows_and_every_ancestor_length_is_rewritten() {
+    // SEQUENCE { SEQUENCE { INTEGER 5 }, BOOLEAN true }
+    let input = h("3008 3003 020105 0101ff");
+    let out = setv(&input, &der_opts(), "0.0.0", "65537").unwrap();
+    assert_eq!(out, h("300a 3005 0203010001 0101ff"));
+    let out = setv(&input, &der_opts(), "0.0.0", "-129").unwrap();
+    assert_eq!(out, h("3009 3004 0202ff7f 0101ff"));
+    let out = setv(&input, &der_opts(), "0.1", "false").unwrap();
+    assert_eq!(out, h("3008 3003 020105 010100"));
+}
+
+#[test]
+fn der_long_form_lengths_change_size() {
+    // An OCTET STRING of 120 bytes inside a SEQUENCE -> 200 bytes: both
+    // lengths move from short form to long form.
+    let mut input = vec![0x30, 122, 0x04, 120];
+    input.extend(std::iter::repeat_n(0xab, 120));
+    let new = format!("hex:{}", "cd".repeat(200));
+    let out = setv(&input, &der_opts(), "0.0", &new).unwrap();
+    assert_eq!(&out[..6], &[0x30, 0x81, 203, 0x04, 0x81, 200]);
+    assert_eq!(out.len(), 3 + 3 + 200);
+}
+
+#[test]
+fn der_certificate_fields_through_pem() {
+    // Issuer CN (PrintableString) and notBefore (UTCTime) of a real cert.
+    let out = String::from_utf8(set1(ISRG_X2.as_bytes(), "0.0.3.1.0.1", "\"Test Root\"").unwrap())
+        .unwrap();
+    assert!(out.starts_with("-----BEGIN CERTIFICATE-----\n"), "{out}");
+    let n = peel(out.as_bytes(), &Options::default()).unwrap();
+    assert_eq!(
+        el(&n, "0.0.3.1.0.1").value,
+        Asn1Value::Text("Test Root".into())
+    );
+    // Everything else, e.g. the subject CN, is unchanged.
+    assert_eq!(
+        el(&n, "0.0.5.2.0.1").value,
+        Asn1Value::Text("ISRG Root X2".into())
+    );
+
+    let out = set1(ISRG_X2.as_bytes(), "0.0.4.0", "\"2030-01-02T03:04:05Z\"").unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    let j = asn1_to_json(el(&n, "0.0.4.0"));
+    assert!(j.contains(r#""value":"300102030405Z""#), "{j}");
+    // The serial number via hex (16 bytes, larger than any integer literal).
+    let out = set1(ISRG_X2.as_bytes(), "0.0.1", "hex:01").unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    assert_eq!(el(&n, "0.0.1").payload().unwrap(), vec![1]);
+}
+
+#[test]
+fn der_encapsulated_bit_string_keeps_unused_bits_byte() {
+    // The ECDSA signature: BIT STRING (0 unused) { SEQUENCE { INTEGER r, INTEGER s } }.
+    let out = set1(ISRG_X2.as_bytes(), "0.2.0.0", "1").unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    let sig = el(&n, "0.2");
+    assert!(
+        matches!(
+            sig.value,
+            Asn1Value::Encapsulated {
+                unused_bits: Some(0),
+                ..
+            }
+        ),
+        "{sig:?}"
+    );
+    assert_eq!(el(&n, "0.2.0.0").payload().unwrap(), vec![1]);
+}
+
+#[test]
+fn der_identity_edit_is_byte_exact() {
+    let n = peel(ISRG_X2.as_bytes(), &Options::default()).unwrap();
+    let cn = match &el(&n, "0.0.5.2.0.1").value {
+        Asn1Value::Text(t) => t.clone(),
+        v => panic!("{v:?}"),
+    };
+    let out = set1(ISRG_X2.as_bytes(), "0.0.5.2.0.1", &format!("str:{cn}")).unwrap();
+    assert_eq!(out, ISRG_X2.as_bytes());
+}
+
+#[test]
+fn der_in_a_pem_bundle_edits_only_that_block() {
+    let bundle = format!("{ISRG_X2}{ISRG_X2}");
+    let out =
+        String::from_utf8(set1(bundle.as_bytes(), "1.0.0.5.2.0.1", "\"Second\"").unwrap()).unwrap();
+    assert!(out.starts_with(ISRG_X2), "first block changed");
+    let n = peel(out.as_bytes(), &Options::default()).unwrap();
+    assert_eq!(n.codec, Codec::Bundle);
+    assert_eq!(
+        select_der(&n, "1.0.0.5.2.0.1").unwrap().value,
+        Asn1Value::Text("Second".into())
+    );
+    assert_eq!(
+        select_der(&n, "0.0.0.5.2.0.1").unwrap().value,
+        Asn1Value::Text("ISRG Root X2".into())
+    );
+}
+
+#[test]
+fn der_value_types() {
+    let one = |hex: &str, v: &str| setv(&h(hex), &der_opts(), "0", v);
+    // OID
+    assert_eq!(
+        one("0603550403", "\"1.2.840.113549.1.1.11\"").unwrap(),
+        h("06092a864886f70d01010b")
+    );
+    // NULL, BOOLEAN
+    assert_eq!(one("0500", "null").unwrap(), h("0500"));
+    // BMPString, IA5String, UTF8String
+    assert_eq!(one("1e00", "\"é\"").unwrap(), h("1e0200e9"));
+    assert_eq!(one("1600", "\"a@b.c\"").unwrap(), h("1605614062 2e63"));
+    assert_eq!(one("0c00", "\"€\"").unwrap(), h("0c03e282ac"));
+    // GeneralizedTime from ISO with fraction and offset
+    assert_eq!(
+        one("1800", "\"2026-11-13T10:00:00.5+02:00\"").unwrap(),
+        b"\x18\x1520261113100000.5+0200".to_vec()
+    );
+    // BIT STRING bytes get a 0 unused-bits byte
+    assert_eq!(one("030100", "hex:ff").unwrap(), h("030200ff"));
+    // A context-tagged primitive takes text or bytes
+    assert_eq!(one("8000", "\"x\"").unwrap(), h("800178"));
+}
+
+#[test]
+fn der_errors() {
+    let code =
+        |hex: &str, path: &str, v: &str| setv(&h(hex), &der_opts(), path, v).unwrap_err().code;
+    assert_eq!(code("3003020105", "0", "1"), "TYPE_MISMATCH"); // constructed
+    assert_eq!(code("020105", "0", "\"x\""), "TYPE_MISMATCH");
+    assert_eq!(code("1300", "0", "\"a@b\""), "VALUE_OUT_OF_RANGE"); // PrintableString
+    assert_eq!(
+        code("1700", "0", "\"2060-01-01T00:00:00Z\""),
+        "VALUE_OUT_OF_RANGE"
+    ); // UTCTime range
+    assert_eq!(code("1700", "0", "\"tomorrow\""), "BAD_VALUE");
+    assert_eq!(code("0603550403", "0", "\"3.1\""), "BAD_VALUE");
+    assert_eq!(code("020105", "1", "1"), "PATH_NOT_FOUND");
+}

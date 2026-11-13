@@ -278,8 +278,8 @@ A `range` points into the buffer the node or field was parsed from:
 bytepeel [OPTIONS] set PATH=VALUE... [FILE]     # writes the new data to stdout
 ```
 
-`set` changes protobuf fields or CBOR/MessagePack values and writes the data
-back in the same outer format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
+`set` changes protobuf fields, CBOR/MessagePack values or DER elements and
+writes the data back in the same outer format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
 &parse_value(v)?)`.
 
 - **Byte-exact splicing.** Only the target field's payload changes. The length
@@ -293,6 +293,11 @@ back in the same outer format it arrived in. Library: `bytepeel_core::set(input,
   paths are map keys and array indices; the item inside any tags is replaced
   and the tags are kept. Because containers count items rather than bytes,
   the new item is spliced in at the old one's range and nothing else moves.
+  DER paths are the `--get` child indices (the first one picks the block of
+  a PEM bundle, and only that block is re-encoded). DER lengths count bytes,
+  so the length of every enclosing element is rewritten, including
+  encapsulating BIT/OCTET STRINGs (a BIT STRING keeps its unused-bits byte).
+  Tag bytes are kept verbatim; rewritten lengths use the minimal DER form.
 - **Layers are re-encoded in their original style:** hex keeps its separator,
   case, `0x` form, wrapping and surrounding whitespace; dumps keep the
   `xxd`/`hexdump -C` layout; base64 keeps its alphabet, padding, line width
@@ -323,13 +328,31 @@ back in the same outer format it arrived in. Library: `bytepeel_core::set(input,
   definite-length with minimal headers, even when they replace an
   indefinite-length item. `true`/`false`/`null` are the one-byte items.
   Nothing produces a MessagePack `ext`; replacing one gives a plain item.
+- **A DER element keeps its tag** and the value is encoded for its type:
+
+  | Element | Value | Content |
+  |---|---|---|
+  | INTEGER, ENUMERATED | `42`, `-129` | minimal two's complement |
+  | BOOLEAN / NULL | `true`, `false` / `null` | `ff`, `00` / empty |
+  | OBJECT IDENTIFIER | `"1.2.840.113549.1.1.11"` | OID |
+  | UTF8String, Graphic/GeneralString, OCTET STRING | `"text"` | UTF-8 |
+  | PrintableString, IA5String, NumericString, VisibleString | `"text"` | checked against the type's character set (`VALUE_OUT_OF_RANGE`) |
+  | BMPString / UniversalString / T61, Videotex | `"text"` | UTF-16BE / UTF-32BE / Latin-1 |
+  | UTCTime, GeneralizedTime | its own form (`300102030405Z`) or ISO 8601 (`"2030-01-02T03:04:05Z"`, offsets and fractions allowed for GeneralizedTime) | the type's form; UTCTime covers 1950-2049 |
+  | any primitive | `hex:..`, `b64:..` | the content bytes verbatim; for a BIT STRING the bits, with 0 unused bits |
+  | `[n]` and other non-universal primitives | `"text"`, `hex:..` | UTF-8 or the bytes |
+
+  A constructed element is `TYPE_MISMATCH` (set one of its children).
+  **Signatures are not updated:** editing a certificate or any other signed
+  structure invalidates its signature. That is intended for building test
+  fixtures; re-sign the result if it must verify.
 
 - **Verified.** The output is decoded again with the same options; `set`
   fails with `REENCODE_VERIFY_FAILED` unless the path selects a field of the
   same wire type with exactly the new payload. This catches edits that change
   how auto-detection reads the data (pin it with `--in`/`--as`).
-- **Not editable yet:** DER, JWT (editing would invalidate the signature),
-  PEM bundles, multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
+- **Not editable yet:** JWT (editing would invalidate the signature),
+  multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
   headers (`REENCODE_UNSUPPORTED`), and data nested inside a CBOR/MessagePack
   byte string (`--get` paths do not enter it). Whole items cannot be added or
   removed.
@@ -432,5 +455,5 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 ## Roadmap
 
-1. Re-encoding for DER; adding and removing fields and items
+1. `set`: adding and removing fields and items
 2. WASM build of `bytepeel-core` → npm package

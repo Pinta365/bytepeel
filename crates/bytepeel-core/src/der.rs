@@ -329,7 +329,7 @@ fn utf32be(c: &[u8]) -> Option<String> {
 
 /// ISO 8601 form of a UTCTime (`YYMMDDHHMM[SS]Z|±hhmm`) or GeneralizedTime
 /// (`YYYYMMDDHH[MM[SS[.f+]]][Z|±hhmm]`). `None` if malformed.
-fn time_iso(t: &str, utc: bool) -> Option<String> {
+pub(crate) fn time_iso(t: &str, utc: bool) -> Option<String> {
     // Valid times are ASCII. Bailing out here also keeps every `&t[..]` slice
     // below on a char boundary (multi-byte UTF-8 used to panic).
     if !t.is_ascii() {

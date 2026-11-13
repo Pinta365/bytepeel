@@ -147,3 +147,14 @@ fn set_on_cbor_and_msgpack() {
     assert_eq!(code, 1);
     assert!(err.contains(r#""code":"TYPE_MISMATCH""#), "{err}");
 }
+
+#[test]
+fn set_on_der() {
+    // SEQUENCE { INTEGER 5 } as hex -> 65537; the SEQUENCE length follows.
+    let (code, out, err) = run(&["set", "0.0=65537"], b"30 03 02 01 05\n");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"30 05 02 03 01 00 01\n");
+    let (code, _, err) = run(&["set", "0=1"], b"30 03 02 01 05");
+    assert_eq!(code, 1);
+    assert!(err.contains(r#""code":"TYPE_MISMATCH""#), "{err}");
+}
