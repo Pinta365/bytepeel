@@ -7,8 +7,12 @@ is excluded from the main workspace because it needs nightly Rust.
 rustup toolchain install nightly --profile minimal
 cargo install cargo-fuzz
 
-cargo +nightly fuzz run -O peel_auto -- -max_total_time=300 -timeout=10
+cargo +nightly fuzz run -O peel_auto -- -max_total_time=300 -timeout=10 -dict=dict/bytepeel.dict
 ```
+
+`dict/bytepeel.dict` holds magic bytes and tokens that random mutation rarely
+assembles (DER time tags, multi-byte UTF-8, compression and CBOR/MessagePack
+headers, PEM and JWT markers). Always pass it.
 
 | Target | What it checks |
 |---|---|
