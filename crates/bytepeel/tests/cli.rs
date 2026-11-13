@@ -131,3 +131,19 @@ fn set_errors() {
     assert_eq!(code, 2);
     assert!(err.contains("USAGE"), "{err}");
 }
+
+#[test]
+fn set_on_cbor_and_msgpack() {
+    // CBOR {"id": 7} as hex text -> id = 300, hex style kept.
+    let (code, out, err) = run(&["set", "id=300"], b"a1 62 69 64 07\n");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"a1 62 69 64 19 01 2c\n");
+    // MessagePack {"a": [1, 2]} -> a.1 = null
+    let (code, out, _) = run(&["set", "a.1=null"], b"81a16192 0102");
+    assert_eq!(code, 0);
+    assert_eq!(out, b"81a16192 01c0");
+    // sint is protobuf-only.
+    let (code, _, err) = run(&["set", "id=sint:1"], b"a162696407");
+    assert_eq!(code, 1);
+    assert!(err.contains(r#""code":"TYPE_MISMATCH""#), "{err}");
+}

@@ -22,6 +22,7 @@ mod der;
 mod detect;
 mod dump;
 mod edit;
+mod encode_value;
 mod error;
 mod json;
 mod jwt;

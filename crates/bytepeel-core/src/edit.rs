@@ -9,7 +9,8 @@
 
 use crate::node::{AltKind, Codec, Detail, Field, FieldValue, Node};
 use crate::path::{message_fields, parse_path};
-use crate::{Diag, Options, compress, reencode, text, varint};
+use crate::value::{Value, ValueKind};
+use crate::{Diag, Options, cbor, compress, encode_value, msgpack, reencode, text, varint};
 
 /// A new value for a field, parsed from the CLI syntax (see [`parse_value`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +22,8 @@ pub enum NewValue {
     /// A floating-point number: `1.5`, `float:1e-3`, `float:NaN`.
     Float(f64),
     Bool(bool),
+    /// `null` (CBOR and MessagePack only).
+    Null,
     /// A UTF-8 string: `"text"` (JSON escapes) or `str:text`.
     Str(String),
     /// Raw bytes: `hex:0a0b`, `b64:CgM=`.
@@ -32,7 +35,7 @@ fn bad_value(s: &str) -> Diag {
         "BAD_VALUE",
         format!(
             "cannot parse value '{s}'; use an integer (42, -2), sint:N, a float (1.5, float:NaN), \
-             true/false, \"text\" or str:text, hex:.. or b64:.."
+             true/false, null, \"text\" or str:text, hex:.. or b64:.."
         ),
         None,
     )
@@ -74,6 +77,7 @@ pub fn parse_value(s: &str) -> Result<NewValue, Diag> {
     match s {
         "true" => return Ok(NewValue::Bool(true)),
         "false" => return Ok(NewValue::Bool(false)),
+        "null" => return Ok(NewValue::Null),
         _ => {}
     }
     if s.starts_with('"') {
@@ -146,11 +150,14 @@ fn json_string(s: &str) -> Option<String> {
 /// options) to a tree where `path` holds exactly the new value.
 pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result<Vec<u8>, Diag> {
     let root = crate::peel(input, opts)?;
+    if crate::is_values(&root) {
+        return set_value(&root, input, opts, path, value);
+    }
     // Validates the path and gives the same errors as --get.
     let target = crate::select(&root, path)?;
     let expected = encode_payload(target, value)?;
     let segs = parse_path(path)?;
-    let out = rebuild(&root, input, &segs, value)?;
+    let out = rebuild(&root, input, &Edit::Field(&segs, value))?;
 
     let again = crate::peel(&out, opts)
         .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
@@ -162,6 +169,88 @@ pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result
         return Err(verify_failed("the field does not hold the new value"));
     }
     Ok(out)
+}
+
+/// `set` on a CBOR or MessagePack tree. Containers count items, not bytes,
+/// so the new item is spliced in at the old one's range; tags on the value
+/// are kept and the item inside them is replaced.
+fn set_value(
+    root: &Node,
+    input: &[u8],
+    opts: &Options,
+    path: &str,
+    value: &NewValue,
+) -> Result<Vec<u8>, Diag> {
+    // Validates the path with the same errors as --get.
+    let target = crate::select_value(root, path)?.untagged();
+    let codec = innermost(root).codec.clone();
+    let item = match codec {
+        Codec::Cbor => encode_value::cbor_scalar(value, &target.kind)?,
+        _ => encode_value::msgpack_scalar(value, &target.kind)?,
+    };
+    let expected = parse_one(&codec, &item)?;
+    let out = rebuild(root, input, &Edit::Value(path, &item))?;
+
+    let again = crate::peel(&out, opts)
+        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
+    if innermost(&again).codec != codec {
+        return Err(verify_failed(&format!(
+            "the data now decodes as {} instead of {}",
+            innermost(&again).codec.name(),
+            codec.name()
+        )));
+    }
+    let got = crate::select_value(&again, path)
+        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?
+        .untagged();
+    if structural(got) != structural(&expected) {
+        return Err(verify_failed("the value does not hold the new item"));
+    }
+    Ok(out)
+}
+
+/// The node at the end of the layer chain.
+fn innermost(node: &Node) -> &Node {
+    match &node.detail {
+        Detail::Layer { child, .. } => innermost(child),
+        _ => node,
+    }
+}
+
+/// Decode exactly one item of `codec` from `bytes`.
+fn parse_one(codec: &Codec, bytes: &[u8]) -> Result<Value, Diag> {
+    let items = match codec {
+        Codec::Cbor => cbor::parse_sequence(bytes)?,
+        _ => msgpack::parse_sequence(bytes)?,
+    };
+    items
+        .into_iter()
+        .next()
+        .ok_or_else(|| verify_failed("the encoder produced no item"))
+}
+
+/// A value's kind with ranges and nested detection stripped, for comparison.
+fn structural(v: &Value) -> ValueKind {
+    match &v.kind {
+        ValueKind::Bytes { data, .. } => ValueKind::Bytes {
+            data: data.clone(),
+            decoded: None,
+        },
+        ValueKind::Float { value, width } => ValueKind::Float {
+            // Compare bit patterns so NaN equals NaN.
+            value: f64::from_bits(value.to_bits()),
+            width: *width,
+        },
+        k => k.clone(),
+    }
+}
+
+/// What to change, carried down through the layers.
+enum Edit<'a> {
+    /// A protobuf field by parsed path.
+    Field(&'a [(u32, usize)], &'a NewValue),
+    /// A CBOR/MessagePack value by `--get` path, and its new encoded item.
+    Value(&'a str, &'a [u8]),
 }
 
 fn verify_failed(why: &str) -> Diag {
@@ -179,19 +268,27 @@ fn unsupported(what: impl Into<String>) -> Diag {
     Diag::new("REENCODE_UNSUPPORTED", what, None)
 }
 
-/// Re-encode `node` (parsed from `buf`) with the field at `segs` changed.
-fn rebuild(node: &Node, buf: &[u8], segs: &[(u32, usize)], v: &NewValue) -> Result<Vec<u8>, Diag> {
-    match &node.detail {
-        Detail::Message { fields } => {
+/// Re-encode `node` (parsed from `buf`) with `edit` applied.
+fn rebuild(node: &Node, buf: &[u8], edit: &Edit<'_>) -> Result<Vec<u8>, Diag> {
+    match (&node.detail, edit) {
+        (Detail::Message { fields }, Edit::Field(segs, v)) => {
             let mut out = Vec::with_capacity(buf.len());
             edit_fields(buf, [0, buf.len()], fields, segs, v, &mut out)?;
             Ok(out)
         }
-        Detail::Layer { decoded, child } => {
-            let inner = rebuild(child, decoded, segs, v)?;
+        (Detail::Values { .. }, Edit::Value(path, item)) => {
+            let [s, e] = crate::select_value(node, path)?.untagged().range;
+            let mut out = Vec::with_capacity(buf.len() + item.len());
+            out.extend_from_slice(&buf[..s]);
+            out.extend_from_slice(item);
+            out.extend_from_slice(&buf[e..]);
+            Ok(out)
+        }
+        (Detail::Layer { decoded, child }, _) => {
+            let inner = rebuild(child, decoded, edit)?;
             encode_layer(&node.codec, buf, &inner)
         }
-        Detail::Parts { .. } if matches!(node.codec, Codec::Jwt { .. }) => Err(unsupported(
+        (Detail::Parts { .. }, _) if matches!(node.codec, Codec::Jwt { .. }) => Err(unsupported(
             "editing a JWT would invalidate its signature; decode the part, edit it, and re-sign it",
         )),
         _ => Err(unsupported(format!(
@@ -285,7 +382,7 @@ fn edit_fields(
                     AltKind::String {
                         decoded: Some(n), ..
                     } if message_fields(n).is_some() => {
-                        inner = rebuild(n, &buf[ds..de], rest, v)?;
+                        inner = rebuild(n, &buf[ds..de], &Edit::Field(rest, v))?;
                         entered = true;
                     }
                     _ => continue,
@@ -390,6 +487,7 @@ mod tests {
         assert_eq!(parse_value("float:1").unwrap(), NewValue::Float(1.0));
         assert!(matches!(parse_value("float:NaN").unwrap(), NewValue::Float(x) if x.is_nan()));
         assert_eq!(parse_value("true").unwrap(), NewValue::Bool(true));
+        assert_eq!(parse_value("null").unwrap(), NewValue::Null);
         assert_eq!(
             parse_value(r#""a\"bé""#).unwrap(),
             NewValue::Str("a\"bé".into())

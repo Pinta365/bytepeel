@@ -278,8 +278,8 @@ A `range` points into the buffer the node or field was parsed from:
 bytepeel [OPTIONS] set PATH=VALUE... [FILE]     # writes the new data to stdout
 ```
 
-`set` changes protobuf fields and writes the data back in the same outer
-format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
+`set` changes protobuf fields or CBOR/MessagePack values and writes the data
+back in the same outer format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
 &parse_value(v)?)`.
 
 - **Byte-exact splicing.** Only the target field's payload changes. The length
@@ -287,9 +287,12 @@ format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
   other byte is copied: field order, unknown fields, other fields'
   non-canonical encodings, and group start/end tags. The field's tag bytes are
   kept verbatim.
-- **Paths** are the `--get` protobuf paths and enter LEN fields the same way
-  (the first `message` alt, or a string whose decoded layers end in a
-  message, e.g. base64 inside a string field).
+- **Paths** are the `--get` paths. Protobuf paths enter LEN fields the same
+  way `--get` does (the first `message` alt, or a string whose decoded layers
+  end in a message, e.g. base64 inside a string field). CBOR/MessagePack
+  paths are map keys and array indices; the item inside any tags is replaced
+  and the tags are kept. Because containers count items rather than bytes,
+  the new item is spliced in at the old one's range and nothing else moves.
 - **Layers are re-encoded in their original style:** hex keeps its separator,
   case, `0x` form, wrapping and surrounding whitespace; dumps keep the
   `xxd`/`hexdump -C` layout; base64 keeps its alphabet, padding, line width
@@ -299,7 +302,7 @@ format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
   zlib keeps its 2-byte header and writes a new Adler-32; zstd is re-compressed.
   Bytes after a compressed stream are kept. The compressed bytes differ from
   the original compressor's.
-- **The field keeps its wire type.** Values:
+- **A protobuf field keeps its wire type.** Values:
 
   | Value | VARINT | I64 | I32 | LEN |
   |---|---|---|---|---|
@@ -310,13 +313,26 @@ format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
   | `"text"` (JSON escapes), `str:text` | — | — | — | UTF-8 |
   | `hex:0a0b`, `b64:CgM=` | — | — | — | bytes |
 
+  `null` is `TYPE_MISMATCH` for protobuf.
+- **A CBOR/MessagePack value may change type** (items are self-describing).
+  Integers use the minimal encoding (CBOR: `[-2^64, 2^64)`, MessagePack:
+  `[-2^63, 2^64)`); `sint:` is `TYPE_MISMATCH`. Floats use the smallest width
+  that holds the value exactly (CBOR 16/32/64, MessagePack 32/64), but never
+  narrower than the float being replaced, so a double stays a double. NaN
+  and ±Infinity take that same width. Strings and byte strings are
+  definite-length with minimal headers, even when they replace an
+  indefinite-length item. `true`/`false`/`null` are the one-byte items.
+  Nothing produces a MessagePack `ext`; replacing one gives a plain item.
+
 - **Verified.** The output is decoded again with the same options; `set`
   fails with `REENCODE_VERIFY_FAILED` unless the path selects a field of the
   same wire type with exactly the new payload. This catches edits that change
   how auto-detection reads the data (pin it with `--in`/`--as`).
-- **Not editable yet:** DER, CBOR, MessagePack, JWT (editing would invalidate
-  the signature), PEM bundles, multi-member gzip / multi-frame zstd, and PEM
-  blocks with RFC 1421 headers (`REENCODE_UNSUPPORTED`).
+- **Not editable yet:** DER, JWT (editing would invalidate the signature),
+  PEM bundles, multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
+  headers (`REENCODE_UNSUPPORTED`), and data nested inside a CBOR/MessagePack
+  byte string (`--get` paths do not enter it). Whole items cannot be added or
+  removed.
 
 ## Heuristics (tunable; each has a test)
 
@@ -416,6 +432,5 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 ## Roadmap
 
-1. `cargo-fuzz` targets for every parser (round-trip property tests exist)
-2. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
-3. WASM build of `bytepeel-core` → npm package
+1. Re-encoding for DER; adding and removing fields and items
+2. WASM build of `bytepeel-core` → npm package

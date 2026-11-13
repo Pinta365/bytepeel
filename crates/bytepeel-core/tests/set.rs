@@ -257,3 +257,159 @@ fn verification_catches_a_changed_interpretation() {
     let out = set(&h("0a03666f6f"), &opts, "1", &parse_value(&long).unwrap()).unwrap();
     assert_eq!(out.len(), 42);
 }
+
+// ------------------------------------------------------------ CBOR / MessagePack
+
+fn cbor_opts() -> Options {
+    Options {
+        input: InputForm::Raw,
+        force: Some(Force::Cbor),
+        ..Options::default()
+    }
+}
+
+fn mp_opts() -> Options {
+    Options {
+        input: InputForm::Raw,
+        force: Some(Force::Msgpack),
+        ..Options::default()
+    }
+}
+
+fn setv(input: &[u8], opts: &Options, path: &str, value: &str) -> Result<Vec<u8>, Diag> {
+    set(input, opts, path, &parse_value(value).unwrap())
+}
+
+fn val<'a>(n: &'a Node, path: &str) -> &'a Value {
+    select_value(n, path).unwrap().untagged()
+}
+
+#[test]
+fn cbor_map_value_is_spliced() {
+    // {"name": "ada", "id": 7} -> id = 300 (grows by two bytes), name = "grace"
+    let input = h("a2 646e616d65 63616461 626964 07");
+    let out = setv(&input, &cbor_opts(), "id", "300").unwrap();
+    assert_eq!(out, h("a2 646e616d65 63616461 626964 19012c"));
+    let out = setv(&out, &cbor_opts(), "name", "\"grace\"").unwrap();
+    assert_eq!(out, h("a2 646e616d65 656772616365 626964 19012c"));
+    // Auto-detection works too (text keys: confidence 0.9).
+    let out = set1(&input, "id", "-1").unwrap();
+    assert_eq!(out, h("a2 646e616d65 63616461 626964 20"));
+}
+
+#[test]
+fn cbor_array_index_and_type_change() {
+    // [1, "two", 3.5] -> [1, null, true]: values are self-describing, so the
+    // type may change.
+    let input = h("83 01 6374776f f9 4300");
+    let out = setv(&input, &cbor_opts(), "1", "null").unwrap();
+    let out = setv(&out, &cbor_opts(), "2", "true").unwrap();
+    assert_eq!(out, h("83 01 f6 f5"));
+    let out = setv(&input, &cbor_opts(), "2", "hex:0a0b").unwrap();
+    assert_eq!(out, h("83 01 6374776f 420a0b"));
+}
+
+#[test]
+fn cbor_tags_are_kept_and_float_width_never_narrows() {
+    // {"ts": 1(1700000000)} -> the tag stays, the epoch changes.
+    let input = h("a1 627473 c1 1a6553f100");
+    let out = setv(&input, &cbor_opts(), "ts", "0").unwrap();
+    assert_eq!(out, h("a1 627473 c1 00"));
+    let n = peel(&out, &cbor_opts()).unwrap();
+    assert!(matches!(val(&n, "ts").kind, ValueKind::Uint(0)));
+    // A double stays a double even when the value fits a half.
+    let input = h("81 fb3ff0000000000000"); // [1.0]
+    let out = setv(&input, &cbor_opts(), "0", "0.5").unwrap();
+    assert_eq!(out, h("81 fb3fe0000000000000"));
+    // A half becomes a double when the value needs it.
+    let input = h("81 f93c00"); // [1.0] as half
+    let out = setv(&input, &cbor_opts(), "0", "0.1").unwrap();
+    assert_eq!(out, h("81 fb3fb999999999999a"));
+    // An integer becomes the smallest exact float.
+    let out = setv(&h("8101"), &cbor_opts(), "0", "1.5").unwrap();
+    assert_eq!(out, h("81 f93e00"));
+}
+
+#[test]
+fn cbor_inside_base64_inside_indefinite_array() {
+    // base64 of an indefinite array [1..=11] -> set index 1 to 1000.
+    let text = b64(&h("9f 0102030405060708090a0b ff"));
+    let out = set_s(&text, "1", "1000");
+    let n = peel(out.as_bytes(), &Options::default()).unwrap();
+    assert_eq!(n.codec.name(), "base64");
+    assert!(matches!(val(&n, "1").kind, ValueKind::Uint(1000)));
+    assert!(val(&n, "0").range == [1, 2]);
+}
+
+#[test]
+fn msgpack_values() {
+    // {"a": 1, "b": [1, 2]} (fixmap, fixstr, fixarray)
+    let input = h("82 a161 01 a162 92 01 02");
+    let out = setv(&input, &mp_opts(), "a", "200").unwrap();
+    assert_eq!(out, h("82 a161 cc c8 a162 92 01 02"));
+    let out = setv(&input, &mp_opts(), "b.1", "-33").unwrap();
+    assert_eq!(out, h("82 a161 01 a162 92 01 d0df"));
+    let out = setv(&input, &mp_opts(), "b", "str:hello").unwrap();
+    assert_eq!(out, h("82 a161 01 a162 a568656c6c6f"));
+    // float32 stays 32 when exact, widens otherwise.
+    let input = h("91 ca3fc00000"); // [1.5]
+    assert_eq!(
+        setv(&input, &mp_opts(), "0", "0.25").unwrap(),
+        h("91 ca3e800000")
+    );
+    assert_eq!(
+        setv(&input, &mp_opts(), "0", "0.1").unwrap(),
+        h("91 cb3fb999999999999a")
+    );
+    // null and bin.
+    assert_eq!(setv(&input, &mp_opts(), "0", "null").unwrap(), h("91 c0"));
+    assert_eq!(
+        setv(&input, &mp_opts(), "0", "hex:ff").unwrap(),
+        h("91 c401ff")
+    );
+    // Auto-detected msgpack keeps being msgpack after the edit.
+    let out = set1(&h("82 a161 01 a162 92 01 02"), "a", "2").unwrap();
+    assert_eq!(
+        peel(&out, &Options::default()).unwrap().codec,
+        Codec::Msgpack
+    );
+}
+
+#[test]
+fn value_errors() {
+    let code = |input: &[u8], opts: &Options, path: &str, v: &str| {
+        setv(input, opts, path, v).unwrap_err().code
+    };
+    let m = h("a1 6161 01");
+    assert_eq!(code(&m, &cbor_opts(), "a", "sint:1"), "TYPE_MISMATCH");
+    assert_eq!(
+        code(&m, &cbor_opts(), "a", "18446744073709551616"),
+        "VALUE_OUT_OF_RANGE"
+    );
+    assert_eq!(code(&m, &cbor_opts(), "b", "1"), "PATH_NOT_FOUND");
+    assert_eq!(code(&m, &cbor_opts(), "a.x", "1"), "PATH_NOT_MESSAGE");
+    let mp = h("81 a161 01");
+    assert_eq!(
+        code(&mp, &mp_opts(), "a", "-9223372036854775809"),
+        "VALUE_OUT_OF_RANGE"
+    );
+    // The whole tree cannot be replaced: paths select a value inside it.
+    assert_eq!(
+        setv(&h("81 01"), &cbor_opts(), "", "1").unwrap_err().code,
+        "BAD_PATH"
+    );
+}
+
+#[test]
+fn value_edit_that_changes_detection_is_caught() {
+    // 82 18 00 18 01 is CBOR [0, 1] but auto-detects as a MessagePack map
+    // (AMBIGUOUS_FORMAT). Editing it as MessagePack with auto options works;
+    // forcing CBOR edits the CBOR reading of the same bytes.
+    let amb = h("8218001801");
+    // MessagePack: key 24 (first entry) -> its value 0 becomes 5.
+    let out = set1(&amb, "24", "5").unwrap();
+    assert_eq!(out, h("82 18 05 18 01"));
+    // CBOR: array index 1 (the item `18 01`) becomes 5.
+    let out = setv(&amb, &cbor_opts(), "1", "5").unwrap();
+    assert_eq!(out, h("82 18 00 05"));
+}

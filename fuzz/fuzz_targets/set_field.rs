@@ -3,7 +3,7 @@
 //! verifies this itself, so an Ok result is re-checked here independently).
 #![no_main]
 
-use bytepeel_core::{Options, parse_value, peel, select, set};
+use bytepeel_core::{Options, is_values, parse_value, peel, select, select_value, set};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -18,6 +18,12 @@ fuzz_target!(|data: &[u8]| {
     let opts = Options::default();
     if let Ok(out) = set(input, &opts, path, &v) {
         let n = peel(&out, &opts).expect("auto-detection never fails");
-        assert!(select(&n, path).is_ok(), "edited output lost the path");
+        // The same dispatch as the CLI: value trees use value paths.
+        let found = if is_values(&n) {
+            select_value(&n, path).is_ok()
+        } else {
+            select(&n, path).is_ok()
+        };
+        assert!(found, "edited output lost the path");
     }
 });

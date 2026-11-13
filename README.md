@@ -60,19 +60,21 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
 
 ### Editing: `bytepeel set`
 
-Change protobuf fields and get the data back in the same outer format, with
-every other byte preserved:
+Change protobuf fields or CBOR/MessagePack values and get the data back in the
+same outer format, with every other byte preserved:
 
 ```console
 $ echo '1a 03 08 96 01' | bytepeel set 3.1=300000
 1a 04 08 e0 a7 12
 
 $ base64 -w0 msg.pb.gz | bytepeel set 2='"new name"' 3=sint:-5 > edited.b64
+
+$ bytepeel set users.0.active=false ttl=null record.cbor > edited.cbor
 ```
 
 Hex keeps its spacing and case, base64 its alphabet and line width, PEM its
-label, gzip its header. Values: `42`, `sint:-2`, `1.5`, `true`, `"text"`,
-`hex:0a0b`, `b64:CgM=`. The output is decoded again and checked before it is
+label, gzip its header. Values: `42`, `sint:-2`, `1.5`, `true`, `null`,
+`"text"`, `hex:0a0b`, `b64:CgM=`. The output is decoded again and checked before it is
 written (`REENCODE_VERIFY_FAILED` otherwise).
 
 Exit codes: `0` success, `1` decode error, `2` usage or I/O error.
