@@ -386,6 +386,28 @@ in.
   byte string (`--get` paths do not enter it), top-level items of a
   multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.
 
+## WebAssembly (`crates/bytepeel-wasm`, `npm/`)
+
+`bytepeel-wasm` compiles the core (with `deflate` and `zstd`) to
+`wasm32-unknown-unknown` with no imports and no generated glue. Its ABI:
+
+| Export | Meaning |
+|---|---|
+| `bp_alloc(len) -> ptr` | allocate `len` bytes for the caller to fill |
+| `bp_free(ptr, len)` | free a `bp_alloc` buffer or a `bp_call` result |
+| `bp_call(op, in, in_len, arg, arg_len, opts, opts_len) -> ptr` | run one operation |
+
+`op`: 0 peel (JSON), 1 tree, 2 get (JSON), 3 get raw payload, 4 edit. `arg`
+is the path (get) or the edits as NUL-separated `kind, path, value` triples
+(`set`/`add`/`del`, values in the CLI syntax). `opts` is `key=value` lines
+(`in`, `as`, `depth`, `alts`). The result is `[status u8][len u32 LE][len
+bytes]`: status 0 is the output, 1 is `{"error":{...}}` JSON; free it with
+`bp_free(ptr, 5 + len)`.
+
+`npm/index.js` wraps this as `load() -> { peel, tree, get, getRaw, edit }`
+with typed edit values (strings are text, numbers are numbers) and
+`BytepeelError`. Build: `npm/build.sh` (`--profile wasm`: release, size-optimized).
+
 ## Heuristics (tunable; each has a test)
 
 | Signal | Effect |
@@ -485,4 +507,5 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 ## Roadmap
 
-1. WASM build of `bytepeel-core` → npm package
+1. Publishing (crates.io, npm) when the project goes public
+2. An MCP server wrapping the library

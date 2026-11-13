@@ -1,0 +1,26 @@
+{
+  "name": "bytepeel",
+  "version": "0.1.0",
+  "description": "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1, CBOR, MessagePack) and edit it in place. WebAssembly, no dependencies.",
+  "license": "MIT",
+  "author": "Pinta365",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./bytepeel.wasm": "./bytepeel.wasm"
+  },
+  "files": ["index.js", "index.d.ts", "bytepeel.wasm", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "private": true,
+  "scripts": {
+    "build": "sh build.sh",
+    "test": "node --test test/"
+  },
+  "keywords": ["protobuf", "asn1", "der", "cbor", "msgpack", "base64", "jwt", "decoder", "wasm"]
+}

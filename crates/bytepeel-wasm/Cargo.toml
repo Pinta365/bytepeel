@@ -1,0 +1,15 @@
+[package]
+name = "bytepeel-wasm"
+description = "WebAssembly build of bytepeel-core with a minimal C-style ABI (no wasm-bindgen)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytepeel-core = { path = "../bytepeel-core", version = "0.1.0", features = ["deflate", "zstd"] }

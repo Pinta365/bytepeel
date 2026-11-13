@@ -6,6 +6,8 @@ Cargo workspace:
 - `crates/bytepeel-core`: the library. It **must stay zero-dependency** (any
   future codec dependency goes behind an optional feature).
 - `crates/bytepeel`: a thin CLI with hand-rolled argument parsing (no clap).
+- `crates/bytepeel-wasm`: the WebAssembly build (minimal C ABI, no
+  wasm-bindgen); `npm/` wraps it for JavaScript.
 
 ## Rules
 
@@ -24,6 +26,7 @@ Cargo workspace:
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+cd npm && npm run build && npm test     # needs the wasm32-unknown-unknown target
 ```
 
 ## Session handoff

@@ -108,12 +108,27 @@ b
 See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,
 error codes and roadmap.
 
+## JavaScript / WebAssembly
+
+`npm/` is a WebAssembly build with a small JS wrapper (Node, Deno, Bun,
+browsers; no dependencies):
+
+```js
+import { load } from "bytepeel";
+const bp = await load();
+bp.get(pem, "0.0.5.2.0.1").value;    // "ISRG Root X2"
+bp.edit(hex, [{ set: "3.1", value: 300000 }]);
+```
+
+See [npm/README.md](npm/README.md).
+
 ## Development
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release      # target/release/bytepeel
+cd npm && npm run build && npm test   # WebAssembly build and JS tests
 ```
 
 ## License

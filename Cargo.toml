@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bytepeel-core", "crates/bytepeel"]
+members = ["crates/bytepeel-core", "crates/bytepeel", "crates/bytepeel-wasm"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -14,3 +14,10 @@ rust-version = "1.85"
 lto = true
 codegen-units = 1
 strip = true
+
+# `cargo build --profile wasm --target wasm32-unknown-unknown -p bytepeel-wasm`:
+# release, optimized for size.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+panic = "abort"
