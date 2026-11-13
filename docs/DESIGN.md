@@ -147,7 +147,7 @@ buffer, and `"indefinite":true` when it used a CBOR indefinite-length form.
   "range": [s, e],
   "indefinite": true?,                        // CBOR indefinite-length form
   "value": "42",                              // uint/nint: decimal string (nint = -1-n)
-  "value": 1.5, "width": 16,                  // float: shortest form, source width 16|32|64
+  "value": 1.5, "width": 16,                  // float: shortest form that round-trips at the source width 16|32|64 (16-bit uses the f32 form)
   "value": true,                              // bool
   "value": 16,                                // simple (CBOR)
   "len": N, "hex": "…", "truncated": true?, "decoded": Node?,  // bytes

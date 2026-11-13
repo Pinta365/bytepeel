@@ -74,7 +74,14 @@ fn value(o: &mut String, v: &Value) {
             let _ = write!(o, ",\"value\":\"{}\"", -(*n as i128) - 1);
         }
         ValueKind::Float { value: x, width } => {
-            let _ = write!(o, ",\"value\":{},\"width\":{width}", fmt_f64(*x));
+            // Shortest form that round-trips at the source width. Half floats
+            // are exact in f32, so they use the f32 form.
+            let v = if *width == 64 {
+                fmt_f64(*x)
+            } else {
+                fmt_f32(*x as f32)
+            };
+            let _ = write!(o, ",\"value\":{v},\"width\":{width}");
         }
         ValueKind::Bool(b) => {
             let _ = write!(o, ",\"value\":{b}");

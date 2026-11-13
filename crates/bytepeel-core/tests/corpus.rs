@@ -1975,3 +1975,51 @@ fn map_less_value_trees_lose_to_plausible_protobuf() {
     // With a text-keyed map inside, CBOR keeps its 0.9.
     assert_eq!(auto(&h("81a1616101")).codec, Codec::Cbor);
 }
+
+#[test]
+fn der_time_with_multibyte_zone_does_not_panic() {
+    // GeneralizedTime "2026111209+a\u{e9}b": a 5-byte zone whose bytes 2..4
+    // are one char. Slicing it by byte index used to panic (exit 101).
+    let mut buf = vec![0x30, 0x11, 0x18, 0x0f];
+    buf.extend_from_slice("2026111209+a\u{e9}b".as_bytes());
+    let n = auto(&buf);
+    assert_eq!(n.codec, Codec::Der);
+    let j = to_json(&n);
+    assert!(
+        j.contains(r#""tag":"GeneralizedTime""#) && !j.contains(r#""iso""#),
+        "{j}"
+    );
+    // Same for UTCTime under --as der.
+    let mut utc = vec![0x17, 0x0f];
+    utc.extend_from_slice("26111209300+\u{e9}1".as_bytes());
+    let opts = Options {
+        input: InputForm::Raw,
+        force: Some(Force::Der),
+        ..Options::default()
+    };
+    assert!(peel(&utc, &opts).is_ok());
+}
+
+#[test]
+fn float_width_uses_source_precision() {
+    let cbor = |hex: &str| {
+        let opts = Options {
+            input: InputForm::Raw,
+            force: Some(Force::Cbor),
+            ..Options::default()
+        };
+        to_json(&peel(&h(hex), &opts).unwrap())
+    };
+    // CBOR [float32 0.1, 1]: printed as 0.1, not 0.10000000149011612.
+    let j = cbor("82fa3dcccccd01");
+    assert!(j.contains(r#""value":0.1,"width":32"#), "{j}");
+    // CBOR [half 0x3555, 1]: the f32 shortest form of 0.333251953125.
+    let j = cbor("82f9355501");
+    assert!(
+        j.contains(r#""width":16"#) && !j.contains("0.333251953125"),
+        "{j}"
+    );
+    // Doubles keep full precision.
+    let j = cbor("82fb3fb999999999999a01");
+    assert!(j.contains(r#""value":0.1,"width":64"#), "{j}");
+}

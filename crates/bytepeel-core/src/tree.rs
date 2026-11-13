@@ -48,7 +48,11 @@ fn value(o: &mut String, v: &Value, d: usize) {
             let _ = writeln!(o, " {}", -(*n as i128) - 1);
         }
         ValueKind::Float { value: x, width } => {
-            let _ = writeln!(o, " {x} width={width}");
+            if *width == 64 {
+                let _ = writeln!(o, " {x} width={width}");
+            } else {
+                let _ = writeln!(o, " {} width={width}", *x as f32);
+            }
         }
         ValueKind::Bool(b) => {
             let _ = writeln!(o, " {b}");
