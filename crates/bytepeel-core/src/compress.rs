@@ -340,6 +340,110 @@ fn disabled(kind: &str, feature: &str) -> Diag {
     )
 }
 
+// ---------------------------------------------------------------- re-encoding
+
+/// Re-compress `new` in the format of `orig` (`kind` is `gzip`, `zlib` or
+/// `zstd`), for `bytepeel set`. gzip keeps the original member header
+/// verbatim (name, mtime, flags) and writes a fresh CRC32/ISIZE; zlib keeps
+/// its 2-byte header and writes a fresh Adler-32. Bytes after the stream are
+/// kept. The compressed bytes themselves differ from the original encoder's.
+pub(crate) fn recompress(kind: &str, orig: &[u8], new: &[u8]) -> Result<Vec<u8>, Diag> {
+    match kind {
+        "gzip" => regzip(orig, new),
+        "zlib" => rezlib(orig, new),
+        _ => rezstd(orig, new),
+    }
+}
+
+#[cfg(any(feature = "deflate", feature = "zstd"))]
+fn multi(kind: &str) -> Diag {
+    Diag::new(
+        "REENCODE_UNSUPPORTED",
+        format!("re-encoding a multi-member/multi-frame {kind} stream is not supported"),
+        None,
+    )
+}
+
+#[cfg(feature = "deflate")]
+fn regzip(orig: &[u8], new: &[u8]) -> Result<Vec<u8>, Diag> {
+    let (body, _) = gzip_header(orig, 0)?;
+    let mut scratch = Vec::new();
+    let used = inflate(&orig[body..], false, &mut scratch, "gzip", body)?;
+    let end = body + used + 8;
+    let rest = orig.get(end..).unwrap_or_default();
+    if rest.starts_with(&[0x1f, 0x8b, 0x08]) {
+        return Err(multi("gzip"));
+    }
+    let mut out = orig[..body].to_vec();
+    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(new, 9));
+    out.extend_from_slice(&crc32(new).to_le_bytes());
+    out.extend_from_slice(&(new.len() as u32).to_le_bytes());
+    out.extend_from_slice(rest);
+    Ok(out)
+}
+
+#[cfg(feature = "deflate")]
+fn rezlib(orig: &[u8], new: &[u8]) -> Result<Vec<u8>, Diag> {
+    let mut scratch = Vec::new();
+    let used = inflate(orig, true, &mut scratch, "zlib", 0)?;
+    let mut out = orig[..2].to_vec();
+    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(new, 9));
+    out.extend_from_slice(&adler32(new).to_be_bytes());
+    out.extend_from_slice(&orig[used..]);
+    Ok(out)
+}
+
+#[cfg(feature = "deflate")]
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for chunk in data.chunks(5552) {
+        for &x in chunk {
+            a += u32::from(x);
+            b += a;
+        }
+        a %= 65_521;
+        b %= 65_521;
+    }
+    (b << 16) | a
+}
+
+#[cfg(not(feature = "deflate"))]
+fn regzip(_: &[u8], _: &[u8]) -> Result<Vec<u8>, Diag> {
+    Err(disabled("gzip", "deflate"))
+}
+
+#[cfg(not(feature = "deflate"))]
+fn rezlib(_: &[u8], _: &[u8]) -> Result<Vec<u8>, Diag> {
+    Err(disabled("zlib", "deflate"))
+}
+
+#[cfg(feature = "zstd")]
+fn rezstd(orig: &[u8], new: &[u8]) -> Result<Vec<u8>, Diag> {
+    use ruzstd::decoding::StreamingDecoder;
+    use std::io::Read;
+
+    let mut src: &[u8] = orig;
+    let mut dec = StreamingDecoder::new(&mut src).map_err(|e| corrupt("zstd", e, Some(0)))?;
+    let mut sink = Vec::new();
+    (&mut dec)
+        .take(MAX_OUTPUT as u64)
+        .read_to_end(&mut sink)
+        .map_err(|e| corrupt("zstd", e, Some(0)))?;
+    drop(dec);
+    if src.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        return Err(multi("zstd"));
+    }
+    let mut out =
+        ruzstd::encoding::compress_to_vec(new, ruzstd::encoding::CompressionLevel::Fastest);
+    out.extend_from_slice(src);
+    Ok(out)
+}
+
+#[cfg(not(feature = "zstd"))]
+fn rezstd(_: &[u8], _: &[u8]) -> Result<Vec<u8>, Diag> {
+    Err(disabled("zstd", "zstd"))
+}
+
 // ---------------------------------------------------------------- crc32
 
 #[cfg(feature = "deflate")]

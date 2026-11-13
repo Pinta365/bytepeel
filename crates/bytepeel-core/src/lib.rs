@@ -21,6 +21,7 @@ mod compress;
 mod der;
 mod detect;
 mod dump;
+mod edit;
 mod error;
 mod json;
 mod jwt;
@@ -28,11 +29,13 @@ mod msgpack;
 mod node;
 mod path;
 mod protobuf;
+mod reencode;
 mod text;
 mod tree;
 mod value;
 pub mod varint;
 
+pub use edit::{NewValue, parse_value, set};
 pub use error::Diag;
 pub use node::{
     Alphabet, Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass,

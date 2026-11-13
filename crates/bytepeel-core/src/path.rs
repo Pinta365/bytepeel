@@ -63,7 +63,7 @@ fn prefix(segs: &[(u32, usize)], n: usize) -> String {
         .join(".")
 }
 
-fn parse_path(p: &str) -> Result<Vec<(u32, usize)>, Diag> {
+pub(crate) fn parse_path(p: &str) -> Result<Vec<(u32, usize)>, Diag> {
     if p.trim().is_empty() {
         return Err(Diag::new("BAD_PATH", "empty path", None));
     }
@@ -88,7 +88,7 @@ fn parse_path(p: &str) -> Result<Vec<(u32, usize)>, Diag> {
         .collect()
 }
 
-fn message_fields(node: &Node) -> Option<&[Field]> {
+pub(crate) fn message_fields(node: &Node) -> Option<&[Field]> {
     match &node.detail {
         Detail::Message { fields } => Some(fields),
         Detail::Layer { child, .. } => message_fields(child),

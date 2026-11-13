@@ -19,6 +19,7 @@ headers, PEM and JWT markers). Always pass it.
 | `peel_auto` | Auto-detection on arbitrary bytes never errors or panics; JSON is deterministic |
 | `peel_options` | Every `InputForm` × `Force` × depth × alts combination (first two bytes pick them) |
 | `select_path` | `--get` paths (`path\0input`) for protobuf and DER selection, JSON/tree/payload |
+| `set_field` | `bytepeel set` (`path\0value\0input`) never panics, and edits decode back |
 | `text_codecs` | `decode_hex` / `decode_b64` never panic, and decoded bytes re-encode losslessly |
 
 Seed a corpus from the test fixtures for faster coverage:

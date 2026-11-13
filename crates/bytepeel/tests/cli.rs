@@ -99,3 +99,35 @@ fn forced_der_error() {
     assert_eq!(code, 1);
     assert!(err.contains(r#""code":"INDEFINITE_LENGTH","#), "{err}");
 }
+
+#[test]
+fn set_rewrites_in_place_style() {
+    let (code, out, err) = run(&["set", "3.1=300000"], b"1a 03 08 96 01\n");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"1a 04 08 e0 a7 12\n");
+    // Several assignments apply in order.
+    let (code, out, _) = run(&["set", "1=2", "2=str:hi"], b"0801 1200");
+    assert_eq!(code, 0);
+    // Hex keeps its 2-byte token grouping across the whole layer.
+    assert_eq!(out, b"0802 1202 6869");
+    // Options may come before the subcommand.
+    let (code, out, _) = run(&["--in", "hex", "set", "1=3"], b"0801");
+    assert_eq!(code, 0);
+    assert_eq!(out, b"0803");
+}
+
+#[test]
+fn set_errors() {
+    let (code, _, err) = run(&["set"], b"0801");
+    assert_eq!(code, 2);
+    assert!(err.contains("USAGE"), "{err}");
+    let (code, _, err) = run(&["set", "1=notavalue"], b"0801");
+    assert_eq!(code, 2);
+    assert!(err.contains(r#""code":"BAD_VALUE""#), "{err}");
+    let (code, _, err) = run(&["set", "1=\"x\""], b"0801");
+    assert_eq!(code, 1);
+    assert!(err.contains(r#""code":"TYPE_MISMATCH""#), "{err}");
+    let (code, _, err) = run(&["set", "1=1", "--get", "1"], b"0801");
+    assert_eq!(code, 2);
+    assert!(err.contains("USAGE"), "{err}");
+}

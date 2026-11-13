@@ -8,6 +8,10 @@ bytepeel - peel layers of encoding off binary data
 
 USAGE:
     bytepeel [OPTIONS] [FILE]      (reads stdin when FILE is omitted or '-')
+    bytepeel [OPTIONS] set PATH=VALUE... [FILE]
+                                   Change protobuf fields and re-encode every layer
+                                   (hex, base64, PEM, gzip, ...) in its original style.
+                                   Writes the new data to stdout.
 
 OPTIONS:
     --in <auto|hex|base64|raw>     How to read the input (default: auto)
@@ -20,6 +24,15 @@ OPTIONS:
     --format <json|tree|raw>       Output format (default: json; raw needs --get)
     -h, --help                     Print help
     -V, --version                  Print version
+
+SET VALUES:
+    42, -2                         integer (negative: 10-byte two's complement varint)
+    sint:-2                        zigzag (sint32/sint64)
+    1.5, float:NaN                 float (I32 fields: float32, I64 fields: double)
+    true, false                    bool
+    \"text\", str:text               string (the quoted form takes JSON escapes)
+    hex:0a0b, b64:CgM=             bytes
+    The field keeps its wire type. The output is decoded again and checked.
 
 EXIT CODES:
     0 success, 1 decode error, 2 usage or I/O error.
@@ -35,6 +48,8 @@ enum Format {
 
 struct Args {
     file: Option<String>,
+    /// `set` mode: (path, value) assignments, applied in order.
+    set: Option<Vec<(String, core::NewValue)>>,
     opts: Options,
     get: Option<String>,
     format: Format,
@@ -58,6 +73,7 @@ fn parse_num(v: &str, flag: &str) -> Result<usize, Diag> {
 fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
     let mut args = Args {
         file: None,
+        set: None,
         opts: Options::default(),
         get: None,
         format: Format::Json,
@@ -130,12 +146,35 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             s if s.starts_with('-') && s != "-" => {
                 return Err(usage(format!("unknown option '{s}' (see --help)")));
             }
+            // `set` is the subcommand when it is the first positional argument
+            // (options may come before it); a file named `set` is `./set`.
+            "set" if args.set.is_none() && args.file.is_none() => args.set = Some(Vec::new()),
+            _ if args.set.is_some() && a.contains('=') => {
+                let (path, v) = a.split_once('=').expect("contains '='");
+                let value = core::parse_value(v)?;
+                args.set
+                    .as_mut()
+                    .expect("set mode")
+                    .push((path.to_string(), value));
+            }
             _ => {
                 if args.file.is_some() {
                     return Err(usage("only one input file is accepted"));
                 }
                 args.file = Some(a);
             }
+        }
+    }
+    if let Some(set) = &args.set {
+        if set.is_empty() {
+            return Err(usage(
+                "set needs at least one PATH=VALUE (e.g. bytepeel set 1.3=42 FILE)",
+            ));
+        }
+        if args.get.is_some() || args.format != Format::Json {
+            return Err(usage(
+                "set writes the re-encoded data; --get and --format do not apply",
+            ));
         }
     }
     if args.format == Format::Raw && args.get.is_none() {
@@ -188,6 +227,21 @@ fn main() -> ExitCode {
         Ok(b) => b,
         Err(e) => return fail(&e, 2),
     };
+    if let Some(set) = &args.set {
+        let mut data = input;
+        for (path, value) in set {
+            data = match core::set(&data, &args.opts, path, value) {
+                Ok(d) => d,
+                Err(e) => return fail(&e, 1),
+            };
+        }
+        let mut out = io::stdout().lock();
+        return match out.write_all(&data).and_then(|()| out.flush()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+            Err(e) => fail(&Diag::new("IO", e.to_string(), None), 2),
+        };
+    }
     let node = match core::peel(&input, &args.opts) {
         Ok(n) => n,
         Err(e) => return fail(&e, 1),

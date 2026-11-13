@@ -272,6 +272,52 @@ A `range` points into the buffer the node or field was parsed from:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
 
+## Re-encoding (`bytepeel set`)
+
+```
+bytepeel [OPTIONS] set PATH=VALUE... [FILE]     # writes the new data to stdout
+```
+
+`set` changes protobuf fields and writes the data back in the same outer
+format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
+&parse_value(v)?)`.
+
+- **Byte-exact splicing.** Only the target field's payload changes. The length
+  prefixes of the enclosing LEN fields are rewritten (minimal varints); every
+  other byte is copied: field order, unknown fields, other fields'
+  non-canonical encodings, and group start/end tags. The field's tag bytes are
+  kept verbatim.
+- **Paths** are the `--get` protobuf paths and enter LEN fields the same way
+  (the first `message` alt, or a string whose decoded layers end in a
+  message, e.g. base64 inside a string field).
+- **Layers are re-encoded in their original style:** hex keeps its separator,
+  case, `0x` form, wrapping and surrounding whitespace; dumps keep the
+  `xxd`/`hexdump -C` layout; base64 keeps its alphabet, padding, line width
+  and line endings; PEM keeps its label and the text around the block. With
+  unchanged bytes, these reproduce the original text exactly. gzip keeps the
+  original member header (name, mtime, flags) and writes a new CRC32/ISIZE;
+  zlib keeps its 2-byte header and writes a new Adler-32; zstd is re-compressed.
+  Bytes after a compressed stream are kept. The compressed bytes differ from
+  the original compressor's.
+- **The field keeps its wire type.** Values:
+
+  | Value | VARINT | I64 | I32 | LEN |
+  |---|---|---|---|---|
+  | `42`, `-2` | int (negative: 10-byte two's complement) | fixed64/sfixed64 | fixed32/sfixed32 | — |
+  | `sint:-2` | zigzag | — | — | — |
+  | `1.5`, `float:NaN` | — | double | float (must fit) | — |
+  | `true` / `false` | 1 / 0 | — | — | — |
+  | `"text"` (JSON escapes), `str:text` | — | — | — | UTF-8 |
+  | `hex:0a0b`, `b64:CgM=` | — | — | — | bytes |
+
+- **Verified.** The output is decoded again with the same options; `set`
+  fails with `REENCODE_VERIFY_FAILED` unless the path selects a field of the
+  same wire type with exactly the new payload. This catches edits that change
+  how auto-detection reads the data (pin it with `--in`/`--as`).
+- **Not editable yet:** DER, CBOR, MessagePack, JWT (editing would invalidate
+  the signature), PEM bundles, multi-member gzip / multi-frame zstd, and PEM
+  blocks with RFC 1421 headers (`REENCODE_UNSUPPORTED`).
+
 ## Heuristics (tunable; each has a test)
 
 | Signal | Effect |
@@ -341,6 +387,11 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `CORRUPT_DATA` | A gzip/zlib/zstd stream is truncated or invalid |
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
 | Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB |
+| `BAD_VALUE` | A `set` value is not in the value syntax (exit 2) |
+| `TYPE_MISMATCH` | A `set` value does not fit the field's wire type |
+| `VALUE_OUT_OF_RANGE` | A `set` integer or float does not fit the field |
+| `REENCODE_UNSUPPORTED` | A layer on the path cannot be re-encoded |
+| `REENCODE_VERIFY_FAILED` | The re-encoded data does not decode back to the new value |
 | Warning: `NONCANONICAL_BASE64` | Unused trailing bits are set |
 | Warning: `TRAILING_DATA` | Non-whitespace text outside PEM blocks (the message reports the ignored byte count), or bytes after a compressed stream, were ignored |
 | Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
