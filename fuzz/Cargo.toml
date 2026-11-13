@@ -1,0 +1,44 @@
+[package]
+name = "bytepeel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytepeel-core = { path = "../crates/bytepeel-core", features = ["deflate", "zstd"] }
+
+# Not part of the main workspace: fuzzing needs nightly and cargo-fuzz.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "peel_auto"
+path = "fuzz_targets/peel_auto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peel_options"
+path = "fuzz_targets/peel_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "select_path"
+path = "fuzz_targets/select_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_codecs"
+path = "fuzz_targets/text_codecs.rs"
+test = false
+doc = false
+bench = false
