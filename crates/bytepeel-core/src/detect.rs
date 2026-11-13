@@ -129,7 +129,8 @@ fn forced(buf: &[u8], depth: usize, opts: &Options, f: Force) -> Result<Node, Di
     }
     match f {
         Force::Protobuf => {
-            let (fields, st) = protobuf::parse_message(buf, 0, buf.len(), depth, opts)?;
+            let (mut fields, st) = protobuf::parse_message(buf, 0, buf.len(), depth, opts)?;
+            protobuf::enrich(&mut fields, depth, opts);
             Ok(Node {
                 codec: Codec::Protobuf,
                 range: [0, buf.len()],
@@ -468,91 +469,93 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
         );
         return bytes_leaf(buf, 0.9, vec![w]);
     }
-    // CBOR, MessagePack and protobuf all compete; never resolve a tie silently.
-    let mut cands: Vec<Cand3> = Vec::new();
-    if depth < opts.depth {
-        if let Some((items, conf, text_keys)) = cbor::detect(buf) {
-            cands.push(Cand3 {
-                rank: 0,
-                conf,
-                text_keys,
-                node: cbor::node(items, conf, buf.len()),
-            });
-        }
-        if let Some((items, conf, text_keys)) = msgpack::detect(buf) {
-            cands.push(Cand3 {
-                rank: 1,
-                conf,
-                text_keys,
-                node: msgpack::node(items, conf, buf.len()),
-            });
-        }
-        if let Ok((fields, st)) = protobuf::parse_message(buf, 0, buf.len(), depth, opts) {
-            let p = protobuf::plausibility(&st, buf.len());
-            if p >= MESSAGE_THRESHOLD {
-                cands.push(Cand3 {
-                    rank: 2,
-                    conf: p,
-                    text_keys: false,
-                    node: protobuf_node(fields, p, buf.len()),
-                });
-            }
-        }
-    }
-    if cands.is_empty() {
+    // CBOR, MessagePack and protobuf compete. Candidates are parsed
+    // structurally (no nested detection); only the winner is enriched.
+    if depth >= opts.depth {
         return bytes_leaf(buf, 0.5, vec![]);
     }
-    // Highest confidence wins; on a tie prefer all-text map keys, then CBOR,
-    // then MessagePack, then protobuf.
+    let mut cands: Vec<Candidate> = Vec::new();
+    if let Some((items, conf, text_keys)) = cbor::detect(buf) {
+        cands.push(Candidate {
+            codec: Codec::Cbor,
+            conf,
+            text_keys,
+            payload: Payload::Values(items),
+        });
+    }
+    if let Some((items, conf, text_keys)) = msgpack::detect(buf) {
+        cands.push(Candidate {
+            codec: Codec::Msgpack,
+            conf,
+            text_keys,
+            payload: Payload::Values(items),
+        });
+    }
+    if let Ok((fields, st)) = protobuf::parse_message(buf, 0, buf.len(), depth, opts) {
+        let conf = protobuf::plausibility(&st, buf.len());
+        if conf >= MESSAGE_THRESHOLD {
+            cands.push(Candidate {
+                codec: Codec::Protobuf,
+                conf,
+                text_keys: false,
+                payload: Payload::Fields(fields),
+            });
+        }
+    }
+    // Highest confidence wins; on a tie prefer all-text map keys, then the
+    // order above (CBOR, MessagePack, protobuf). A stable sort keeps that order.
     cands.sort_by(|a, b| {
         b.conf
             .total_cmp(&a.conf)
             .then(b.text_keys.cmp(&a.text_keys))
-            .then(a.rank.cmp(&b.rank))
     });
-    let mut best = cands.remove(0);
-    if !cands.is_empty() {
-        let mut msg = String::from("also parses as ");
-        for (i, c) in cands.iter().enumerate() {
-            if i > 0 {
-                msg.push_str(", ");
-            }
-            msg.push_str(&format!("{} ({:.2})", value_codec_name(c.rank), c.conf));
-        }
-        best.node
-            .warnings
-            .push(Diag::new("AMBIGUOUS_FORMAT", msg, None));
+    let mut cands = cands.into_iter();
+    let Some(best) = cands.next() else {
+        return bytes_leaf(buf, 0.5, vec![]);
+    };
+    let others: Vec<String> = cands
+        .map(|c| format!("{} ({:.2})", c.codec.name(), c.conf))
+        .collect();
+    let mut warnings = vec![];
+    if !others.is_empty() {
+        warnings.push(Diag::new(
+            "AMBIGUOUS_FORMAT",
+            format!("also parses as {}", others.join(", ")),
+            None,
+        ));
     }
     // Nested detection runs once, on the winner only.
-    if let Detail::Values { items } = &mut best.node.detail {
-        enrich_values(items, depth, opts);
-    }
-    best.node
-}
-
-struct Cand3 {
-    rank: u8,
-    conf: f64,
-    text_keys: bool,
-    node: Node,
-}
-
-fn value_codec_name(rank: u8) -> &'static str {
-    match rank {
-        0 => "cbor",
-        1 => "msgpack",
-        _ => "protobuf",
-    }
-}
-
-fn protobuf_node(fields: Vec<crate::Field>, conf: f64, len: usize) -> Node {
+    let detail = match best.payload {
+        Payload::Values(mut items) => {
+            enrich_values(&mut items, depth, opts);
+            Detail::Values { items }
+        }
+        Payload::Fields(mut fields) => {
+            protobuf::enrich(&mut fields, depth, opts);
+            Detail::Message { fields }
+        }
+    };
     Node {
-        codec: Codec::Protobuf,
-        range: [0, len],
-        confidence: conf,
-        detail: Detail::Message { fields },
-        warnings: vec![],
+        codec: best.codec,
+        range: [0, buf.len()],
+        confidence: best.conf,
+        detail,
+        warnings,
     }
+}
+
+/// A binary-format candidate, parsed structurally.
+struct Candidate {
+    codec: Codec,
+    conf: f64,
+    /// Every map key is a text string (tie-break signal).
+    text_keys: bool,
+    payload: Payload,
+}
+
+enum Payload {
+    Values(Vec<crate::Value>),
+    Fields(Vec<crate::Field>),
 }
 
 /// Recognize formats by magic bytes so they are not misread as protobuf.

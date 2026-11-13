@@ -236,6 +236,34 @@ fn parse_fields(
 }
 
 /// Rank the possible meanings of a LEN field's payload `buf[s..e]`.
+/// Run nested detection on string alts (`decoded`), once, over a message that
+/// was parsed structurally and chosen. `depth` is the message's own depth, as
+/// passed to `parse_message`.
+///
+/// Candidate parsing must stay structural: if a losing candidate also ran
+/// nested detection, bytes reachable from two candidates would be detected
+/// twice per level, and the cost would double with depth.
+pub(crate) fn enrich(fields: &mut [Field], depth: usize, opts: &Options) {
+    for f in fields {
+        match &mut f.value {
+            FieldValue::Len { alts, .. } => {
+                for a in alts {
+                    match &mut a.kind {
+                        AltKind::Message(sub) => enrich(sub, depth + 1, opts),
+                        AltKind::String { text, decoded } => {
+                            *decoded =
+                                detect::nested_text_layer(text, depth + 1, opts).map(Box::new);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            FieldValue::Group { fields } => enrich(fields, depth + 1, opts),
+            _ => {}
+        }
+    }
+}
+
 fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) -> Vec<Alt> {
     let data = &buf[s..e];
     if data.is_empty() {
@@ -266,11 +294,11 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
     if let Some(t) = text {
         let score = 0.9 * pr.powi(4);
         if score > 0.01 {
-            let decoded = detect::nested_text_layer(t, depth + 1, opts).map(Box::new);
+            // `decoded` is filled by `enrich` once this message has won.
             alts.push(Alt {
                 kind: AltKind::String {
                     text: t.to_string(),
-                    decoded,
+                    decoded: None,
                 },
                 score,
             });
@@ -308,4 +336,36 @@ fn packed_varints(data: &[u8]) -> Option<Vec<u64>> {
         p += n;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod structural_tests {
+    use super::*;
+
+    /// Candidate parsing must not run nested detection (see `enrich`): if it
+    /// did, bytes reachable from a losing candidate and the winner would be
+    /// detected twice per level, doubling the cost with depth.
+    #[test]
+    fn parse_is_structural_and_enrich_decodes_once() {
+        // Field 1 LEN "SGVsbG8gd29ybGQh" (base64 of "Hello world!").
+        let mut buf = vec![0x0a, 16];
+        buf.extend_from_slice(b"SGVsbG8gd29ybGQh");
+        let opts = Options::default();
+        let (mut fields, _) = parse_message(&buf, 0, buf.len(), 0, &opts).unwrap();
+        let decoded = |fields: &[Field]| match &fields[0].value {
+            FieldValue::Len { alts, .. } => alts.iter().any(|a| {
+                matches!(
+                    &a.kind,
+                    AltKind::String {
+                        decoded: Some(_),
+                        ..
+                    }
+                )
+            }),
+            _ => panic!(),
+        };
+        assert!(!decoded(&fields), "parse_message ran nested detection");
+        enrich(&mut fields, 0, &opts);
+        assert!(decoded(&fields), "enrich did not decode the base64 string");
+    }
 }

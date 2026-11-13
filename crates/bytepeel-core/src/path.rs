@@ -171,23 +171,32 @@ pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
     Ok(cur.expect("path has at least one segment"))
 }
 
-/// Select a CBOR value by path.
+/// Select a CBOR or MessagePack value by path.
 ///
 /// Each segment is a map key or an array index (`users.0.name`). A segment
 /// matches a text key exactly; a numeric segment indexes an array, or matches
-/// an integer map key. If the top level has several items (a forced CBOR
-/// sequence), the first segment indexes them. Tags are followed transparently.
+/// an integer map key. If the top level has several items (a forced
+/// CBOR/MessagePack sequence), the first segment indexes them. CBOR tags are
+/// followed transparently.
 pub fn select_value<'a>(root: &'a Node, path: &str) -> Result<&'a Value, Diag> {
     let segs = parse_value_path(path)?;
-    let items = values_items(root)
-        .ok_or_else(|| Diag::new("PATH_NOT_MESSAGE", "the input did not decode to CBOR", None))?;
+    let items = values_items(root).ok_or_else(|| {
+        Diag::new(
+            "PATH_NOT_MESSAGE",
+            "the input did not decode to CBOR/MessagePack",
+            None,
+        )
+    })?;
     let (mut cur, start) = if items.len() == 1 {
         (&items[0], 0)
     } else {
         let idx: usize = segs[0].parse().map_err(|_| {
             Diag::new(
                 "PATH_NOT_FOUND",
-                format!("'{}' is not an index into the CBOR sequence", segs[0]),
+                format!(
+                    "'{}' is not an index into the CBOR/MessagePack sequence",
+                    segs[0]
+                ),
                 None,
             )
         })?;
@@ -269,14 +278,14 @@ fn parse_value_path(p: &str) -> Result<Vec<&str>, Diag> {
     if segs.iter().any(|s| s.is_empty()) {
         return Err(Diag::new(
             "BAD_PATH",
-            "CBOR paths do not allow empty segments",
+            "CBOR/MessagePack paths do not allow empty segments",
             None,
         ));
     }
     Ok(segs)
 }
 
-/// True when `node` (after any text layers) is CBOR.
+/// True when `node` (after any text layers) is CBOR or MessagePack.
 pub fn is_values(node: &Node) -> bool {
     values_items(node).is_some()
 }

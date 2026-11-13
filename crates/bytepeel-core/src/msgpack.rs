@@ -1,13 +1,14 @@
 //! MessagePack: a schemaless parser into the shared [`Value`] tree.
 //!
 //! Integer negatives map to `ValueKind::Nint` (`-1 - n`), strings must be
-//! valid UTF-8, `bin` values are decoded with the normal nested detection, and
-//! extension values become `ValueKind::Ext`. Reserved `0xc1`, truncation and
-//! deep nesting are hard errors when the format is forced.
+//! valid UTF-8, and extension values become `ValueKind::Ext`. Parsing is
+//! structural; a `bin` value's nested `decoded` node is filled later by
+//! [`crate::detect::enrich_values`]. Reserved `0xc1`, truncation and deep
+//! nesting are hard errors when the format is forced.
 
 use crate::Diag;
 use crate::node::{Codec, Detail, Node};
-use crate::value::{Value, ValueKind};
+use crate::value::{self, Value, ValueKind};
 
 /// Hard recursion cap, independent of `Options::depth`.
 const MAX_NEST: usize = 100;
@@ -68,8 +69,8 @@ pub(crate) fn detect(buf: &[u8]) -> Option<(Vec<Value>, f64, bool)> {
     }
     match &items[0].kind {
         ValueKind::Map(_) | ValueKind::Array(_) => {
-            let conf = if keys_simple(&items[0]) { 0.9 } else { 0.7 };
-            let text_keys = keys_all_text(&items[0]);
+            let conf = value::structure_confidence(&items, 127, 31);
+            let text_keys = value::keys_all_text(&items);
             Some((items, conf, text_keys))
         }
         _ => None,
@@ -84,38 +85,6 @@ pub(crate) fn node(items: Vec<Value>, confidence: f64, len: usize) -> Node {
         confidence,
         detail: Detail::Values { items },
         warnings: vec![],
-    }
-}
-
-/// Every map key anywhere is a string or a small (fixint) integer.
-fn keys_simple(v: &Value) -> bool {
-    match &v.kind {
-        ValueKind::Map(entries) => entries
-            .iter()
-            .all(|(k, val)| is_simple_key(k) && keys_simple(val)),
-        ValueKind::Array(items) => items.iter().all(keys_simple),
-        _ => true,
-    }
-}
-
-fn is_simple_key(k: &Value) -> bool {
-    match &k.kind {
-        ValueKind::Text(_) => true,
-        // positive/negative fixint ranges
-        ValueKind::Uint(n) => *n <= 127,
-        ValueKind::Nint(n) => *n <= 31,
-        _ => false,
-    }
-}
-
-/// Every map key anywhere is a string (used for tie-breaking).
-fn keys_all_text(v: &Value) -> bool {
-    match &v.kind {
-        ValueKind::Map(entries) => entries
-            .iter()
-            .all(|(k, val)| matches!(&k.kind, ValueKind::Text(_)) && keys_all_text(val)),
-        ValueKind::Array(items) => items.iter().all(keys_all_text),
-        _ => true,
     }
 }
 

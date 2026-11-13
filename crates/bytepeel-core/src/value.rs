@@ -44,12 +44,13 @@ pub enum ValueKind {
 }
 
 impl Value {
-    /// The bytes `--format raw` writes: a byte string's bytes, or a text
-    /// string's UTF-8. `None` for everything else.
+    /// The bytes `--format raw` writes: a byte string's or extension's bytes,
+    /// or a text string's UTF-8. `None` for everything else.
     pub fn payload(&self) -> Option<Vec<u8>> {
         match &self.kind {
             ValueKind::Bytes { data, .. } => Some(data.clone()),
             ValueKind::Text(t) => Some(t.as_bytes().to_vec()),
+            ValueKind::Ext { data, .. } => Some(data.clone()),
             _ => None,
         }
     }
@@ -82,6 +83,84 @@ pub(crate) fn type_name(k: &ValueKind) -> &'static str {
     }
 }
 
+/// Every map key anywhere in `values` is a text string.
+///
+/// Shared by CBOR and MessagePack detection (and available to the candidate
+/// ranking). CBOR tags are followed.
+/// Auto-detection confidence for a structurally valid CBOR/MessagePack tree.
+///
+/// Maps are the strong signal: 0.9 when every key is text or a small integer
+/// (at most `max_uint` / `-1 - max_nint`), 0.7 with other keys. A tree with no
+/// map at all (arrays of scalars) is weak evidence, since many protobuf
+/// messages whose first tag is for field 16+ also parse that way: 0.6, so a
+/// plausible protobuf reading (0.9) wins and the array shows up only in
+/// `AMBIGUOUS_FORMAT`.
+pub(crate) fn structure_confidence(values: &[Value], max_uint: u64, max_nint: u64) -> f64 {
+    if !values.iter().any(contains_map) {
+        0.6
+    } else if keys_simple(values, max_uint, max_nint) {
+        0.9
+    } else {
+        0.7
+    }
+}
+
+fn contains_map(v: &Value) -> bool {
+    match &v.kind {
+        ValueKind::Map(_) => true,
+        ValueKind::Array(items) => items.iter().any(contains_map),
+        ValueKind::Tag(_, inner) => contains_map(inner),
+        _ => false,
+    }
+}
+
+pub(crate) fn keys_all_text(values: &[Value]) -> bool {
+    values.iter().all(value_keys_all_text)
+}
+
+fn value_keys_all_text(v: &Value) -> bool {
+    match &v.kind {
+        ValueKind::Map(entries) => entries.iter().all(|(k, val)| {
+            matches!(&k.untagged().kind, ValueKind::Text(_)) && value_keys_all_text(val)
+        }),
+        ValueKind::Array(items) => items.iter().all(value_keys_all_text),
+        ValueKind::Tag(_, inner) => value_keys_all_text(inner),
+        _ => true,
+    }
+}
+
+/// Every map key anywhere in `values` is a text string, a `Uint` `<= max_uint`,
+/// or a `Nint` whose stored `n` (value `-1 - n`) is `<= max_nint`.
+///
+/// Shared by CBOR (`23, 23`) and MessagePack (its fixint ranges, `127, 31`).
+pub(crate) fn keys_simple(values: &[Value], max_uint: u64, max_nint: u64) -> bool {
+    values
+        .iter()
+        .all(|v| value_keys_simple(v, max_uint, max_nint))
+}
+
+fn value_keys_simple(v: &Value, max_uint: u64, max_nint: u64) -> bool {
+    match &v.kind {
+        ValueKind::Map(entries) => entries.iter().all(|(k, val)| {
+            is_simple_key(k, max_uint, max_nint) && value_keys_simple(val, max_uint, max_nint)
+        }),
+        ValueKind::Array(items) => items
+            .iter()
+            .all(|x| value_keys_simple(x, max_uint, max_nint)),
+        ValueKind::Tag(_, inner) => value_keys_simple(inner, max_uint, max_nint),
+        _ => true,
+    }
+}
+
+fn is_simple_key(k: &Value, max_uint: u64, max_nint: u64) -> bool {
+    match &k.untagged().kind {
+        ValueKind::Text(_) => true,
+        ValueKind::Uint(n) => *n <= max_uint,
+        ValueKind::Nint(n) => *n <= max_nint,
+        _ => false,
+    }
+}
+
 /// Well-known CBOR tag names (RFC 8949 Appendix B and common registrations).
 pub(crate) fn tag_name(n: u64) -> Option<&'static str> {
     Some(match n {
@@ -105,11 +184,11 @@ pub(crate) fn tag_name(n: u64) -> Option<&'static str> {
 /// A tag-1 (epoch) value as an ISO-8601 UTC string, when it is a number.
 pub(crate) fn epoch_iso(v: &Value) -> Option<String> {
     match &v.kind {
-        ValueKind::Uint(n) if *n <= i64::MAX as u64 => Some(iso_utc(*n as i64)),
+        ValueKind::Uint(n) if *n <= i64::MAX as u64 => iso_utc_checked(*n as i64),
         ValueKind::Nint(n) => {
             let val = -(*n as i128) - 1;
             if val >= i64::MIN as i128 {
-                Some(iso_utc(val as i64))
+                iso_utc_checked(val as i64)
             } else {
                 None
             }
@@ -117,7 +196,7 @@ pub(crate) fn epoch_iso(v: &Value) -> Option<String> {
         ValueKind::Float { value, .. } if value.is_finite() => {
             let secs = value.trunc();
             if (-9.223_372_036_854_776e18..=9.223_372_036_854_776e18).contains(&secs) {
-                Some(iso_utc(secs as i64))
+                iso_utc_checked(secs as i64)
             } else {
                 None
             }
@@ -165,7 +244,8 @@ pub(crate) fn uuid_string(data: &[u8]) -> String {
 
 /// Epoch seconds to `YYYY-MM-DDTHH:MM:SSZ` (Howard Hinnant's `civil_from_days`).
 ///
-/// Shared by CBOR tag 1 and JWT `exp`/`nbf`/`iat`.
+/// This is unchecked: a year outside `0000..=9999` is formatted with a wrong
+/// width. Callers that put the result in output use [`iso_utc_checked`].
 pub(crate) fn iso_utc(epoch: i64) -> String {
     let days = epoch.div_euclid(86_400);
     let secs = epoch.rem_euclid(86_400);
@@ -174,9 +254,23 @@ pub(crate) fn iso_utc(epoch: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
+/// True when epoch seconds fall in a year RFC 3339 can represent (0000..=9999).
+fn in_year_range(epoch: i64) -> bool {
+    let (y, _, _) = civil_from_days(epoch.div_euclid(86_400));
+    (0..=9999).contains(&y)
+}
+
+/// Like [`iso_utc`], but `None` when the year is outside `0000..=9999`.
+///
+/// Shared by CBOR tag 1, MessagePack timestamps and JWT `exp`/`nbf`/`iat`, so
+/// none of them emit an out-of-range (malformed) date.
+pub(crate) fn iso_utc_checked(epoch: i64) -> Option<String> {
+    in_year_range(epoch).then(|| iso_utc(epoch))
+}
+
 /// Epoch seconds plus nanoseconds to ISO-8601 UTC, trimming trailing zero
 /// digits from the fraction (so whole seconds get no fraction at all).
-pub(crate) fn iso_utc_nanos(secs: i64, nanos: u32) -> String {
+fn iso_utc_nanos(secs: i64, nanos: u32) -> String {
     let base = iso_utc(secs);
     if nanos == 0 {
         return base;
@@ -184,6 +278,11 @@ pub(crate) fn iso_utc_nanos(secs: i64, nanos: u32) -> String {
     let frac = format!("{nanos:09}");
     let frac = frac.trim_end_matches('0');
     format!("{}.{}Z", &base[..base.len() - 1], frac)
+}
+
+/// Like [`iso_utc_nanos`], but `None` outside the `0000..=9999` year range.
+pub(crate) fn iso_utc_nanos_checked(secs: i64, nanos: u32) -> Option<String> {
+    in_year_range(secs).then(|| iso_utc_nanos(secs, nanos))
 }
 
 /// A MessagePack timestamp extension (type -1) as ISO-8601 UTC.
@@ -216,7 +315,7 @@ pub(crate) fn ext_iso(type_: i8, data: &[u8]) -> Option<String> {
     if nanos >= 1_000_000_000 {
         return None;
     }
-    Some(iso_utc_nanos(secs, nanos))
+    iso_utc_nanos_checked(secs, nanos)
 }
 
 /// Days since 1970-01-01 -> (year, month, day).
@@ -243,6 +342,54 @@ mod tests {
         assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso_utc(-1), "1969-12-31T23:59:59Z");
         assert_eq!(iso_utc(1_363_896_240), "2013-03-21T20:04:00Z");
+    }
+
+    #[test]
+    fn iso_year_range() {
+        // In range, including before 1970.
+        assert_eq!(iso_utc_checked(-1).unwrap(), "1969-12-31T23:59:59Z");
+        assert_eq!(
+            iso_utc_nanos_checked(-1, 500_000_000).unwrap(),
+            "1969-12-31T23:59:59.5Z"
+        );
+        // 9999-12-31T23:59:59Z is the last representable second.
+        assert_eq!(
+            iso_utc_checked(253_402_300_799).unwrap(),
+            "9999-12-31T23:59:59Z"
+        );
+        // Year 10000 and i64::MIN are out of RFC 3339 range.
+        assert!(iso_utc_checked(253_402_300_800).is_none());
+        assert!(iso_utc_checked(i64::MIN).is_none());
+        assert!(iso_utc_nanos_checked(i64::MIN, 0).is_none());
+    }
+
+    #[test]
+    fn key_thresholds() {
+        let v = |kind| Value {
+            range: [0, 0],
+            kind,
+            indefinite: false,
+        };
+        let map = |k| v(ValueKind::Map(vec![(k, v(ValueKind::Null))]));
+        // CBOR allows 23, MessagePack's fixint range allows 127.
+        assert!(keys_simple(&[map(v(ValueKind::Uint(23)))], 23, 23));
+        assert!(!keys_simple(&[map(v(ValueKind::Uint(24)))], 23, 23));
+        assert!(keys_simple(&[map(v(ValueKind::Uint(24)))], 127, 31));
+        assert!(!keys_simple(&[map(v(ValueKind::Uint(128)))], 127, 31));
+        // Nint stores -1 - value: 23 means -24.
+        assert!(keys_simple(&[map(v(ValueKind::Nint(23)))], 23, 23));
+        assert!(!keys_simple(&[map(v(ValueKind::Nint(24)))], 23, 23));
+        assert!(keys_simple(&[map(v(ValueKind::Nint(31)))], 127, 31));
+        assert!(!keys_simple(&[map(v(ValueKind::Nint(32)))], 127, 31));
+        // Non-integer keys.
+        assert!(keys_simple(&[map(v(ValueKind::Text("k".into())))], 23, 23));
+        assert!(!keys_simple(&[map(v(ValueKind::Bool(true)))], 127, 31));
+        // All-text is stricter, and recursion reaches nested maps.
+        assert!(keys_all_text(&[map(v(ValueKind::Text("k".into())))]));
+        assert!(!keys_all_text(&[map(v(ValueKind::Uint(1)))]));
+        let nested = v(ValueKind::Array(vec![map(v(ValueKind::Uint(1)))]));
+        assert!(keys_simple(std::slice::from_ref(&nested), 23, 23));
+        assert!(!keys_all_text(std::slice::from_ref(&nested)));
     }
 
     #[test]

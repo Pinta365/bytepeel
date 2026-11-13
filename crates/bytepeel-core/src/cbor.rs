@@ -7,7 +7,7 @@
 
 use crate::detect;
 use crate::node::{Codec, Detail, Node};
-use crate::value::{Value, ValueKind};
+use crate::value::{self, Value, ValueKind};
 use crate::{Diag, Options};
 
 /// Hard recursion cap, independent of `Options::depth`.
@@ -82,28 +82,16 @@ pub(crate) fn detect(buf: &[u8]) -> Option<(Vec<Value>, f64, bool)> {
         return None;
     }
     if self_describe {
-        let text_keys = keys_all_text(&items[0]);
+        let text_keys = value::keys_all_text(&items);
         return Some((items, 0.99, text_keys));
     }
     match &items[0].untagged().kind {
         ValueKind::Map(_) | ValueKind::Array(_) => {
-            let conf = if keys_are_simple(&items[0]) { 0.9 } else { 0.7 };
-            let text_keys = keys_all_text(&items[0]);
+            let conf = value::structure_confidence(&items, 23, 23);
+            let text_keys = value::keys_all_text(&items);
             Some((items, conf, text_keys))
         }
         _ => None,
-    }
-}
-
-/// Every map key anywhere in `v` is a text string.
-fn keys_all_text(v: &Value) -> bool {
-    match &v.kind {
-        ValueKind::Map(entries) => entries
-            .iter()
-            .all(|(k, val)| matches!(&k.untagged().kind, ValueKind::Text(_)) && keys_all_text(val)),
-        ValueKind::Array(items) => items.iter().all(keys_all_text),
-        ValueKind::Tag(_, inner) => keys_all_text(inner),
-        _ => true,
     }
 }
 
@@ -115,26 +103,6 @@ pub(crate) fn node(items: Vec<Value>, confidence: f64, len: usize) -> Node {
         confidence,
         detail: Detail::Values { items },
         warnings: vec![],
-    }
-}
-
-/// Every map key anywhere in `v` is a text string or a small int.
-fn keys_are_simple(v: &Value) -> bool {
-    match &v.kind {
-        ValueKind::Map(entries) => entries
-            .iter()
-            .all(|(k, val)| is_simple_key(k) && keys_are_simple(val)),
-        ValueKind::Array(items) => items.iter().all(keys_are_simple),
-        ValueKind::Tag(_, inner) => keys_are_simple(inner),
-        _ => true,
-    }
-}
-
-fn is_simple_key(k: &Value) -> bool {
-    match &k.untagged().kind {
-        ValueKind::Text(_) => true,
-        ValueKind::Uint(n) | ValueKind::Nint(n) => *n < 24,
-        _ => false,
     }
 }
 

@@ -11,7 +11,7 @@
 //! notation, non-numbers and values that overflow `i64` are ignored.
 
 use crate::text;
-use crate::value::iso_utc;
+use crate::value::iso_utc_checked;
 
 /// One dot-separated segment: its byte range in the input text and its bytes.
 pub(crate) struct Part {
@@ -136,8 +136,9 @@ fn extract_times(s: &str) -> Vec<(&'static str, String)> {
     }
     let mut out = Vec::new();
     for (ci, name) in CLAIMS.iter().enumerate() {
-        if let Some(v) = vals[ci] {
-            out.push((*name, iso_utc(v)));
+        // Omit claims whose year is outside RFC 3339's 0000..=9999 range.
+        if let Some(v) = vals[ci].and_then(iso_utc_checked) {
+            out.push((*name, v));
         }
     }
     out
@@ -293,11 +294,20 @@ mod tests {
 
     #[test]
     fn dates() {
-        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(iso_utc(-1), "1969-12-31T23:59:59Z");
-        assert_eq!(iso_utc(1_709_164_800), "2024-02-29T00:00:00Z");
-        assert_eq!(iso_utc(4_102_444_800), "2100-01-01T00:00:00Z");
-        assert_eq!(iso_utc(2_147_483_648), "2038-01-19T03:14:08Z");
+        assert_eq!(iso_utc_checked(0).unwrap(), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_utc_checked(-1).unwrap(), "1969-12-31T23:59:59Z");
+        assert_eq!(
+            iso_utc_checked(1_709_164_800).unwrap(),
+            "2024-02-29T00:00:00Z"
+        );
+        assert_eq!(
+            iso_utc_checked(4_102_444_800).unwrap(),
+            "2100-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            iso_utc_checked(2_147_483_648).unwrap(),
+            "2038-01-19T03:14:08Z"
+        );
     }
 
     #[test]

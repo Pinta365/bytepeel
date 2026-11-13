@@ -178,6 +178,11 @@ self-describe. Tag 1 adds `iso` (its numeric value as ISO-8601 UTC); tags 2/3
 add `int` (a decimal bignum); tag 37 with 16 bytes adds `uuid`; tag 24 forces
 the byte string's `decoded` node to CBOR.
 
+An `iso` string (CBOR tag 1, MessagePack timestamp, JWT `exp`/`nbf`/`iat`) is
+emitted only when the year is inside RFC 3339's `0000..=9999`; out-of-range
+epochs (e.g. `i64::MIN`, or a year past 9999) omit it rather than print a
+malformed date.
+
 ### JWT
 
 ```jsonc
@@ -262,7 +267,7 @@ A `range` points into the buffer the node or field was parsed from:
   (`users.0.name`). A segment matches a text key exactly, indexes an array, or
   matches an integer map key; CBOR tags are followed transparently and a
   multi-item sequence is indexed by the first segment. `--format raw` writes a
-  `bytes` value's bytes or a `text` value's UTF-8.
+  `bytes` value's bytes, an `ext` value's data, or a `text` value's UTF-8.
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
@@ -283,9 +288,9 @@ A `range` points into the buffer the node or field was parsed from:
 | Protobuf plausibility | starts at 0.9; ×0.85 per overlong varint, ×0.5 if a field number >1000 (×0.3 if >100k), ×0.7 per group, ×0.6 per wire-type conflict, ×0.6 for a single field in ≤3 bytes |
 | DER (auto) | buffer starts with `0x30`, ≥4 bytes, parses as exactly one element with no malformed universal content: 0.95 (0.8 plus `NONCANONICAL_DER` for non-minimal lengths or integers) |
 | DER encapsulation | BIT STRING (unused bits 0) / OCTET STRING content ≥2 bytes that parses completely as canonical, well-formed DER; a lone primitive must have a typed universal tag |
-| CBOR (auto) | a self-describe (`d9 d9 f7`) prefix: 0.99; otherwise the buffer must parse as exactly one item of ≥2 bytes whose top level (after tags) is a map or array, with valid UTF-8 everywhere: 0.9, or 0.7 when any map key is not a text string or a small int (`|n| ≤ 23`) |
-| MessagePack (auto) | the buffer must parse as exactly one item of ≥2 bytes whose top level is a map or array: 0.9, or 0.7 when any map key is not a string or a fixint (`0..=127`, or `n ≤ 31` for `nint`) |
-| CBOR / MessagePack / protobuf | when several accept the buffer, the highest confidence wins; on a tie prefer all-text map keys, then CBOR, then MessagePack, then protobuf. Every other interpretation is named with its confidence in one `AMBIGUOUS_FORMAT` warning |
+| CBOR (auto) | a self-describe (`d9 d9 f7`) prefix: 0.99; otherwise the buffer must parse as exactly one item of ≥2 bytes whose top level (after tags) is a map or array, with valid UTF-8 everywhere: 0.9, or 0.7 when any map key is not a text string or a small int (`|n| ≤ 23`), or 0.6 when the tree contains no map at all |
+| MessagePack (auto) | the buffer must parse as exactly one item of ≥2 bytes whose top level is a map or array: 0.9, or 0.7 when any map key is not a string or a fixint (`0..=127`, or `n ≤ 31` for `nint`), or 0.6 when the tree contains no map at all |
+| CBOR / MessagePack / protobuf | when several accept the buffer, the highest confidence wins; on a tie prefer all-text map keys, then CBOR, then MessagePack, then protobuf. Every other interpretation is named with its confidence in one `AMBIGUOUS_FORMAT` warning. Map-less trees score 0.6 because many protobuf messages whose first tag is for field 16+ also parse as a CBOR/MessagePack array. Candidates are parsed structurally; nested detection (byte strings, protobuf string fields) runs once, on the winner |
 | gzip / zstd | magic `1f 8b 08` / `28 b5 2f fd`; decoded (confidence 1.0) only if the stream is complete and its CRC32 / content checksum matches, else a `bytes` leaf with the error as a warning |
 | zlib | a valid 2-byte header (CM 8, CINFO ≤ 7, FCHECK, no FDICT) whose stream inflates with a matching Adler-32. Failures are reported only for the common headers `78 01/5e/9c/da`; other headers fall through to DER/protobuf |
 | Decompressed size | capped at 64 MiB (`OUTPUT_TOO_LARGE`) |

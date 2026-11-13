@@ -1572,14 +1572,15 @@ fn msgpack_detection() {
     // Plain protobuf is not mistaken for MessagePack.
     assert_eq!(auto(&h("089601")).codec, Codec::Protobuf);
 
-    // A buffer that is valid as several codecs: CBOR wins the tie, and every
-    // other interpretation is named in one warning.
+    // A buffer that is valid as several codecs: CBOR array [0, 1] (no map:
+    // weak, 0.6), MessagePack map {24: 0, 24: 1} (0.9) and protobuf. The map
+    // wins, and every other interpretation is named in one warning.
     let n = auto(&h("8218001801"));
-    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(n.codec, Codec::Msgpack);
     assert_eq!(n.warnings.len(), 1);
     assert_eq!(n.warnings[0].code, "AMBIGUOUS_FORMAT");
     assert!(
-        n.warnings[0].message.contains("msgpack") && n.warnings[0].message.contains("protobuf"),
+        n.warnings[0].message.contains("cbor") && n.warnings[0].message.contains("protobuf"),
         "{}",
         n.warnings[0].message
     );
@@ -1918,4 +1919,59 @@ fn ambiguous_chain_is_linear_and_bounded_by_depth() {
             );
         }
     }
+}
+
+#[test]
+fn iso_year_range_is_enforced() {
+    fn ts96(secs: i64, nanos: u32) -> Vec<u8> {
+        let mut b = vec![0xc7, 0x0c, 0xff];
+        b.extend_from_slice(&nanos.to_be_bytes());
+        b.extend_from_slice(&secs.to_be_bytes());
+        b
+    }
+    // In range, before 1970: the iso is kept.
+    let j = to_json(&msgpack_bytes(&ts96(-1, 500_000_000)));
+    assert!(j.contains(r#""iso":"1969-12-31T23:59:59.5Z""#), "{j}");
+    // i64::MIN and the first second of year 10000 are out of RFC 3339 range.
+    for secs in [i64::MIN, 253_402_300_800] {
+        let j = to_json(&msgpack_bytes(&ts96(secs, 0)));
+        assert!(j.contains(r#""ext_type":-1"#), "{j}");
+        assert!(!j.contains("\"iso\""), "secs {secs}: {j}");
+    }
+    // CBOR tag 1 with an out-of-range epoch: no iso; an in-range one keeps it.
+    let j = to_json(&cbor("c13b7fffffffffffffff")); // tag 1, nint i64::MIN
+    assert!(
+        j.contains(r#""name":"epoch""#) && !j.contains("\"iso\""),
+        "{j}"
+    );
+    assert!(to_json(&cbor("c11a514b67b0")).contains(r#""iso":"2013-03-21T20:04:00Z""#));
+}
+
+#[test]
+fn select_ext_value_payload_is_raw() {
+    // MessagePack map {"x": ext type 5 [1, 2, 3]}.
+    let n = auto(&h("81a178c70305010203"));
+    let v = select_value(&n, "x").unwrap();
+    assert_eq!(v.payload(), Some(vec![1, 2, 3]));
+    assert!(
+        value_to_json(v).contains(r#""ext_type":5"#),
+        "{}",
+        value_to_json(v)
+    );
+}
+
+#[test]
+fn map_less_value_trees_lose_to_plausible_protobuf() {
+    // 81 1b <8 bytes> is CBOR [uint64] (an array, no map: 0.6) and also
+    // protobuf field 432 as I64 (tag 0x81 0x1b), plausibility 0.9.
+    let n = auto(&h("811b0000000000000005"));
+    assert_eq!(n.codec, Codec::Protobuf, "{}", to_json(&n));
+    assert_eq!(n.warnings[0].code, "AMBIGUOUS_FORMAT");
+    assert!(
+        n.warnings[0].message.contains("cbor (0.60)"),
+        "{}",
+        n.warnings[0].message
+    );
+    // With a text-keyed map inside, CBOR keeps its 0.9.
+    assert_eq!(auto(&h("81a1616101")).codec, Codec::Cbor);
 }

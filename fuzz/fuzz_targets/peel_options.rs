@@ -18,9 +18,11 @@ fuzz_target!(|data: &[u8]| {
             None,
             Some(Force::Protobuf),
             Some(Force::Der),
+            Some(Force::Cbor),
+            Some(Force::Msgpack),
             Some(Force::Text),
             Some(Force::Bytes),
-        ][usize::from((a >> 2) % 5)],
+        ][usize::from((a >> 2) % 7)],
         depth: usize::from(b & 0x1f),
         alts: usize::from(b >> 5) + 1,
     };
