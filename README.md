@@ -60,8 +60,10 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
 
 ### Editing: `bytepeel set`
 
-Change protobuf fields, CBOR/MessagePack values or DER elements and get the
-data back in the same outer format, with every other byte preserved:
+Change, add and remove protobuf fields, CBOR/MessagePack values and DER
+elements, and get the data back in the same outer format, with every other
+byte preserved. `PATH=VALUE` changes, `PATH+=VALUE` adds, `--del PATH`
+removes:
 
 ```console
 $ echo '1a 03 08 96 01' | bytepeel set 3.1=300000
@@ -69,7 +71,10 @@ $ echo '1a 03 08 96 01' | bytepeel set 3.1=300000
 
 $ base64 -w0 msg.pb.gz | bytepeel set 2='"new name"' 3=sint:-5 > edited.b64
 
-$ bytepeel set users.0.active=false ttl=null record.cbor > edited.cbor
+$ bytepeel set users.0.active=false ttl=null 'tags.0+="new"' --del legacy record.cbor > edited.cbor
+
+$ echo '08 96 01 12 03 66 6f 6f' | bytepeel set 3+=42 --del 2
+08 96 01 18 2a
 
 $ bytepeel set '0.0.5.2.0.1="Test Root"' '0.0.4.1="2045-06-07T08:09:10Z"' ca.pem > test-ca.pem
 ```

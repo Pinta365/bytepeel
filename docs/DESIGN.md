@@ -275,12 +275,20 @@ A `range` points into the buffer the node or field was parsed from:
 ## Re-encoding (`bytepeel set`)
 
 ```
-bytepeel [OPTIONS] set PATH=VALUE... [FILE]     # writes the new data to stdout
+bytepeel [OPTIONS] set EDIT... [FILE]     # writes the new data to stdout
+
+EDIT:  PATH=VALUE    change
+       PATH+=VALUE   add
+       --del PATH    remove
 ```
 
-`set` changes protobuf fields, CBOR/MessagePack values or DER elements and
-writes the data back in the same outer format it arrived in. Library: `bytepeel_core::set(input, &opts, path,
-&parse_value(v)?)`.
+Edits apply in the order given; each one is a separate decode, splice and
+verification. Library: `bytepeel_core::edit(input, &opts, &Op::{Set, Add,
+Del})`; `set(..)` is `edit` with `Op::Set`.
+
+`set` changes, adds and removes protobuf fields, CBOR/MessagePack values and
+DER elements, and writes the data back in the same outer format it arrived
+in.
 
 - **Byte-exact splicing.** Only the target field's payload changes. The length
   prefixes of the enclosing LEN fields are rewritten (minimal varints); every
@@ -351,11 +359,32 @@ writes the data back in the same outer format it arrived in. Library: `bytepeel_
   fails with `REENCODE_VERIFY_FAILED` unless the path selects a field of the
   same wire type with exactly the new payload. This catches edits that change
   how auto-detection reads the data (pin it with `--in`/`--as`).
+- **Adding (`PATH+=VALUE`):**
+
+  | Codec | `PATH` | Placement | Encoding |
+  |---|---|---|---|
+  | protobuf | `PARENT.N` (`N` alone = top level); no `[i]` | appended at the end of the parent message (or group); a repeated field gets a new last occurrence | integers, `sint:`, bools → VARINT; floats → I64 (double); text and bytes → LEN. `null` is `TYPE_MISMATCH`. Field numbers 1..=2^29-1 |
+  | CBOR / MessagePack map | `PARENT.KEY` | appended after the last entry | key is a text string; `ALREADY_EXISTS` if the key is present |
+  | CBOR / MessagePack array | `PARENT.I`, `0 ≤ I ≤ length` | inserted before item `I` (`I` = length appends) | as for a changed value |
+  | DER | `PARENT.I`, `0 ≤ I ≤ number of children` | inserted before element `I` | the value is one complete element as `hex:`/`b64:` (e.g. `hex:0101ff`); `BAD_VALUE` otherwise |
+
+  The parent must be a message, map, array, or constructed/encapsulating
+  element (`PATH_NOT_MESSAGE`). Verified: the new item is at `PATH` (for
+  protobuf, the last occurrence) with the expected value, and the parent has
+  one more child.
+- **Removing (`--del PATH`):** the field, entry (key and value) or element
+  at `PATH` is cut out. Verified: the parent has one fewer child.
+- **Containers are rewritten as needed:** enclosing LEN prefixes (protobuf)
+  and DER lengths up to the top, and the item count of a definite
+  CBOR/MessagePack container (its header may change size, e.g. a 23-item
+  CBOR array `97` becomes `98 18`, a 15-entry MessagePack fixmap becomes
+  `map16`). Indefinite CBOR containers have no count: items go before the
+  break byte.
 - **Not editable yet:** JWT (editing would invalidate the signature),
   multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
-  headers (`REENCODE_UNSUPPORTED`), and data nested inside a CBOR/MessagePack
-  byte string (`--get` paths do not enter it). Whole items cannot be added or
-  removed.
+  headers (`REENCODE_UNSUPPORTED`), data nested inside a CBOR/MessagePack
+  byte string (`--get` paths do not enter it), top-level items of a
+  multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.
 
 ## Heuristics (tunable; each has a test)
 
@@ -430,7 +459,8 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | `TYPE_MISMATCH` | A `set` value does not fit the field's wire type |
 | `VALUE_OUT_OF_RANGE` | A `set` integer or float does not fit the field |
 | `REENCODE_UNSUPPORTED` | A layer on the path cannot be re-encoded |
-| `REENCODE_VERIFY_FAILED` | The re-encoded data does not decode back to the new value |
+| `REENCODE_VERIFY_FAILED` | The re-encoded data does not decode back to the requested change |
+| `ALREADY_EXISTS` | `PATH+=VALUE` names a map key that is already present |
 | Warning: `NONCANONICAL_BASE64` | Unused trailing bits are set |
 | Warning: `TRAILING_DATA` | Non-whitespace text outside PEM blocks (the message reports the ignored byte count), or bytes after a compressed stream, were ignored |
 | Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
@@ -455,5 +485,4 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 ## Roadmap
 
-1. `set`: adding and removing fields and items
-2. WASM build of `bytepeel-core` → npm package
+1. WASM build of `bytepeel-core` → npm package

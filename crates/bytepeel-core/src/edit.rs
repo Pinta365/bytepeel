@@ -8,7 +8,9 @@
 //! returned.
 
 use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass};
-use crate::path::{message_fields, parse_path};
+use crate::path::{
+    bundle_parts, der_items, field_children, map_index, message_fields, parse_path, values_items,
+};
 use crate::value::{Value, ValueKind};
 use crate::{Diag, Options, cbor, compress, der, encode_value, msgpack, reencode, text, varint};
 
@@ -145,71 +147,416 @@ fn json_string(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Set the protobuf field at `path` (as for [`crate::select`]) to `value`,
-/// re-encoding every enclosing layer. The output decodes (with the same
-/// options) to a tree where `path` holds exactly the new value.
-pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result<Vec<u8>, Diag> {
-    let root = crate::peel(input, opts)?;
-    if crate::is_values(&root) {
-        return set_value(&root, input, opts, path, value);
-    }
-    if crate::is_der(&root) {
-        return set_der(&root, input, opts, path, value);
-    }
-    // Validates the path and gives the same errors as --get.
-    let target = crate::select(&root, path)?;
-    let expected = encode_payload(target, value)?;
-    let segs = parse_path(path)?;
-    let out = rebuild(&root, input, &Edit::Field(&segs, value))?;
-
-    let again = crate::peel(&out, opts)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
-    let f = crate::select(&again, path)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
-    if f.payload().as_deref() != Some(&expected[..])
-        || f.value.wire_name() != target.value.wire_name()
-    {
-        return Err(verify_failed("the field does not hold the new value"));
-    }
-    Ok(out)
+/// One edit for [`edit`]. Paths are the `--get` paths of the decoded tree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Op {
+    /// Change the protobuf field, CBOR/MessagePack value or DER element at
+    /// the path.
+    Set(String, NewValue),
+    /// Add: a protobuf field `PARENT.N` (appended to the parent message, or
+    /// the top-level message for `N`), a CBOR/MessagePack map key or array
+    /// index (inserted there; an index equal to the length appends), or a DER
+    /// element index (inserted; the value is one complete element as
+    /// `hex:`/`b64:`).
+    Add(String, NewValue),
+    /// Remove the field, value or element at the path.
+    Del(String),
 }
 
-/// `set` on a CBOR or MessagePack tree. Containers count items, not bytes,
-/// so the new item is spliced in at the old one's range; tags on the value
-/// are kept and the item inside them is replaced.
-fn set_value(
-    root: &Node,
-    input: &[u8],
-    opts: &Options,
-    path: &str,
-    value: &NewValue,
-) -> Result<Vec<u8>, Diag> {
-    // Validates the path with the same errors as --get.
-    let target = crate::select_value(root, path)?.untagged();
-    let codec = innermost(root).codec.clone();
-    let item = match codec {
-        Codec::Cbor => encode_value::cbor_scalar(value, &target.kind)?,
-        _ => encode_value::msgpack_scalar(value, &target.kind)?,
-    };
-    let expected = parse_one(&codec, &item)?;
-    let out = rebuild(root, input, &Edit::Value(path, &item))?;
+/// Set the field at `path` to `value`: `edit(input, opts, &Op::Set(..))`.
+pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result<Vec<u8>, Diag> {
+    edit(input, opts, &Op::Set(path.to_string(), value.clone()))
+}
 
-    let again = crate::peel(&out, opts)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
-    if innermost(&again).codec != codec {
-        return Err(verify_failed(&format!(
-            "the data now decodes as {} instead of {}",
-            innermost(&again).codec.name(),
-            codec.name()
-        )));
+/// Apply one edit and re-encode every enclosing layer in its original style.
+/// The output is decoded again with the same options and checked; the result
+/// is returned only if it holds exactly the requested change.
+pub fn edit(input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+    let root = crate::peel(input, opts)?;
+    if crate::is_values(&root) {
+        return values_op(&root, input, opts, op);
     }
-    let got = crate::select_value(&again, path)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?
-        .untagged();
-    if structural(got) != structural(&expected) {
-        return Err(verify_failed("the value does not hold the new item"));
+    if crate::is_der(&root) {
+        return der_op(&root, input, opts, op);
     }
-    Ok(out)
+    protobuf_op(&root, input, opts, op)
+}
+
+fn reparse(out: &[u8], opts: &Options) -> Result<Node, Diag> {
+    crate::peel(out, opts).map_err(vf)
+}
+
+/// A selection error on the re-encoded output is a verification failure.
+fn vf(e: Diag) -> Diag {
+    verify_failed(&format!("{}: {}", e.code, e.message))
+}
+
+// ---------------------------------------------------------------- protobuf ops
+
+fn protobuf_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+    match op {
+        Op::Set(path, value) => {
+            // Validates the path and gives the same errors as --get.
+            let target = crate::select(root, path)?;
+            let expected = encode_payload(target, value)?;
+            let segs = parse_path(path)?;
+            let out = rebuild(
+                root,
+                input,
+                &Edit::Field(&segs, &FieldAction::Replace(value)),
+            )?;
+            let again = reparse(&out, opts)?;
+            let f = crate::select(&again, path).map_err(vf)?;
+            if f.payload().as_deref() != Some(&expected[..])
+                || f.value.wire_name() != target.value.wire_name()
+            {
+                return Err(verify_failed("the field does not hold the new value"));
+            }
+            Ok(out)
+        }
+        Op::Del(path) => {
+            crate::select(root, path)?;
+            let segs = parse_path(path)?;
+            let (prefix, (num, _)) = (&segs[..segs.len() - 1], segs[segs.len() - 1]);
+            let before = pb_count(root, prefix, num)?;
+            let out = rebuild(root, input, &Edit::Field(&segs, &FieldAction::Delete))?;
+            let again = reparse(&out, opts)?;
+            if pb_count(&again, prefix, num).map_err(vf)? + 1 != before {
+                return Err(verify_failed("the field was not removed"));
+            }
+            Ok(out)
+        }
+        Op::Add(path, value) => {
+            if path.trim_end().ends_with(']') {
+                return Err(Diag::new(
+                    "BAD_PATH",
+                    "an added field's path ends in its field number (e.g. 1.3), not an index",
+                    None,
+                ));
+            }
+            let segs = parse_path(path)?;
+            let (prefix, (num, _)) = (&segs[..segs.len() - 1], segs[segs.len() - 1]);
+            if num == 0 {
+                return Err(Diag::new(
+                    "FIELD_NUMBER_ZERO",
+                    "field number 0 is invalid",
+                    None,
+                ));
+            }
+            if num > (1 << 29) - 1 {
+                return Err(Diag::new(
+                    "FIELD_NUMBER_TOO_LARGE",
+                    "field numbers go up to 536870911",
+                    None,
+                ));
+            }
+            let before = pb_count(root, prefix, num)?;
+            let (wire, payload) = new_field_payload(num, value)?;
+            let mut bytes = varint::encode(u64::from(num) << 3 | wire);
+            if wire == 2 {
+                bytes.extend_from_slice(&varint::encode(payload.len() as u64));
+            }
+            bytes.extend_from_slice(&payload);
+            let out = rebuild(
+                root,
+                input,
+                &Edit::Field(prefix, &FieldAction::Append(&bytes)),
+            )?;
+            let again = reparse(&out, opts)?;
+            let f = crate::select(&again, &format!("{path}[{before}]")).map_err(vf)?;
+            let wire_name = ["VARINT", "I64", "LEN"][wire as usize];
+            if f.payload().as_deref() != Some(&payload[..]) || f.value.wire_name() != wire_name {
+                return Err(verify_failed("the new field does not hold the value"));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// The fields of the message at `prefix` (the top-level message when empty).
+fn pb_children<'a>(root: &'a Node, prefix: &[(u32, usize)]) -> Result<&'a [Field], Diag> {
+    if prefix.is_empty() {
+        return message_fields(root).ok_or_else(|| {
+            Diag::new(
+                "PATH_NOT_MESSAGE",
+                "the input did not decode to a protobuf message",
+                None,
+            )
+        });
+    }
+    let p = prefix
+        .iter()
+        .map(|(n, i)| {
+            if *i == 0 {
+                n.to_string()
+            } else {
+                format!("{n}[{i}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let f = crate::select(root, &p)?;
+    field_children(f).ok_or_else(|| {
+        Diag::new(
+            "PATH_NOT_MESSAGE",
+            format!("field at '{p}' is not a message"),
+            None,
+        )
+    })
+}
+
+fn pb_count(root: &Node, prefix: &[(u32, usize)], num: u32) -> Result<usize, Diag> {
+    Ok(pb_children(root, prefix)?
+        .iter()
+        .filter(|f| f.number == num)
+        .count())
+}
+
+/// Wire type and payload of a new field: integers and bools are VARINT,
+/// floats are I64 (double), strings and bytes are LEN.
+fn new_field_payload(num: u32, v: &NewValue) -> Result<(u64, Vec<u8>), Diag> {
+    Ok(match v {
+        NewValue::Int(n) => {
+            if *n < i128::from(i64::MIN) || *n > i128::from(u64::MAX) {
+                return Err(Diag::new(
+                    "VALUE_OUT_OF_RANGE",
+                    "a VARINT must be in [-2^63, 2^64)",
+                    None,
+                ));
+            }
+            (
+                0,
+                varint::encode(if *n < 0 { *n as i64 as u64 } else { *n as u64 }),
+            )
+        }
+        NewValue::Sint(n) => (0, varint::encode(((*n << 1) ^ (*n >> 63)) as u64)),
+        NewValue::Bool(b) => (0, vec![u8::from(*b)]),
+        NewValue::Float(x) => (1, x.to_bits().to_le_bytes().to_vec()),
+        NewValue::Str(s) => (2, s.as_bytes().to_vec()),
+        NewValue::Bytes(b) => (2, b.clone()),
+        NewValue::Null => {
+            return Err(Diag::new(
+                "TYPE_MISMATCH",
+                format!("field {num}: protobuf has no null; use --del to remove a field"),
+                None,
+            ));
+        }
+    })
+}
+
+// ---------------------------------------------------------------- CBOR/MessagePack ops
+
+fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+    let codec = innermost(root).codec.clone();
+    let vbuf = innermost_buf(root, input);
+    let encode = |v: &NewValue, like: &ValueKind| match codec {
+        Codec::Cbor => encode_value::cbor_scalar(v, like),
+        _ => encode_value::msgpack_scalar(v, like),
+    };
+    let check_codec = |again: &Node| {
+        if innermost(again).codec == codec {
+            Ok(())
+        } else {
+            Err(verify_failed(&format!(
+                "the data now decodes as {} instead of {}",
+                innermost(again).codec.name(),
+                codec.name()
+            )))
+        }
+    };
+    match op {
+        Op::Set(path, value) => {
+            // Validates the path with the same errors as --get.
+            let target = crate::select_value(root, path)?.untagged();
+            let item = encode(value, &target.kind)?;
+            let expected = parse_one(&codec, &item)?;
+            let out = rebuild(root, input, &Edit::Splices(&[(target.range, item)]))?;
+            let again = reparse(&out, opts)?;
+            check_codec(&again)?;
+            let got = crate::select_value(&again, path).map_err(vf)?.untagged();
+            if structural(got) != structural(&expected) {
+                return Err(verify_failed("the value does not hold the new item"));
+            }
+            Ok(out)
+        }
+        Op::Del(path) => {
+            crate::select_value(root, path)?;
+            let (parent, last) = split_last(path);
+            let c = container(root, parent)?;
+            let (range, count) = match &c.kind {
+                ValueKind::Array(items) => {
+                    let i: usize = last.parse().expect("validated by select_value");
+                    (items[i].range, items.len())
+                }
+                ValueKind::Map(entries) => {
+                    let i = map_index(entries, last).expect("validated by select_value");
+                    (
+                        [entries[i].0.range[0], entries[i].1.range[1]],
+                        entries.len(),
+                    )
+                }
+                _ => unreachable!("container() returns maps and arrays"),
+            };
+            let mut splices: Vec<([usize; 2], Vec<u8>)> = header_splice(&codec, vbuf, c, count - 1)
+                .into_iter()
+                .collect();
+            splices.push((range, vec![]));
+            let out = rebuild(root, input, &Edit::Splices(&splices))?;
+            let again = reparse(&out, opts)?;
+            check_codec(&again)?;
+            if container_len(container(&again, parent).map_err(vf)?) + 1 != count {
+                return Err(verify_failed("the item was not removed"));
+            }
+            Ok(out)
+        }
+        Op::Add(path, value) => {
+            let (parent, last) = split_last(path);
+            let c = container(root, parent)?;
+            let item = encode(value, &ValueKind::Null)?;
+            let expected = parse_one(&codec, &item)?;
+            let (pos, bytes, count) = match &c.kind {
+                ValueKind::Map(entries) => {
+                    if map_index(entries, last).is_some() {
+                        return Err(Diag::new(
+                            "ALREADY_EXISTS",
+                            format!("key '{last}' already exists; use PATH=VALUE to change it"),
+                            None,
+                        ));
+                    }
+                    let mut bytes = encode(&NewValue::Str(last.to_string()), &ValueKind::Null)?;
+                    bytes.extend_from_slice(&item);
+                    let end = end_pos(c, entries.last().map(|e| e.1.range[1]));
+                    (end, bytes, entries.len())
+                }
+                ValueKind::Array(items) => {
+                    let i: usize = last.parse().map_err(|_| {
+                        Diag::new("BAD_PATH", format!("'{last}' is not an array index"), None)
+                    })?;
+                    if i > items.len() {
+                        return Err(Diag::new(
+                            "PATH_NOT_FOUND",
+                            format!(
+                                "index {i} is past the end (the array has {} items)",
+                                items.len()
+                            ),
+                            None,
+                        ));
+                    }
+                    let pos = match items.get(i) {
+                        Some(v) => v.range[0],
+                        None => end_pos(c, items.last().map(|v| v.range[1])),
+                    };
+                    (pos, item.clone(), items.len())
+                }
+                _ => unreachable!("container() returns maps and arrays"),
+            };
+            let mut splices: Vec<([usize; 2], Vec<u8>)> = header_splice(&codec, vbuf, c, count + 1)
+                .into_iter()
+                .collect();
+            splices.push(([pos, pos], bytes));
+            let out = rebuild(root, input, &Edit::Splices(&splices))?;
+            let again = reparse(&out, opts)?;
+            check_codec(&again)?;
+            let got = crate::select_value(&again, path).map_err(vf)?.untagged();
+            if structural(got) != structural(&expected)
+                || container_len(container(&again, parent).map_err(vf)?) != count + 1
+            {
+                return Err(verify_failed("the new item is not where it should be"));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// `a.b.c` -> (`a.b`, `c`); `c` -> (``, `c`).
+fn split_last(path: &str) -> (&str, &str) {
+    path.rsplit_once('.').unwrap_or(("", path))
+}
+
+/// The map or array at `parent` (the single top-level item when empty),
+/// with tags followed.
+fn container<'a>(root: &'a Node, parent: &str) -> Result<&'a Value, Diag> {
+    let v = if parent.is_empty() {
+        match values_items(root) {
+            Some([only]) => only,
+            _ => {
+                return Err(unsupported(
+                    "adding or removing top-level items of a multi-item sequence is not supported",
+                ));
+            }
+        }
+    } else {
+        crate::select_value(root, parent)?
+    }
+    .untagged();
+    match v.kind {
+        ValueKind::Array(_) | ValueKind::Map(_) => Ok(v),
+        _ => Err(Diag::new(
+            "PATH_NOT_MESSAGE",
+            format!("'{parent}' is not a map or array"),
+            None,
+        )),
+    }
+}
+
+fn container_len(c: &Value) -> usize {
+    match &c.kind {
+        ValueKind::Array(items) => items.len(),
+        ValueKind::Map(entries) => entries.len(),
+        _ => 0,
+    }
+}
+
+/// Where a new item goes after the last one: after `last_end`, or for an
+/// empty container right after the header (definite) / before the break
+/// byte (indefinite).
+fn end_pos(c: &Value, last_end: Option<usize>) -> usize {
+    match last_end {
+        Some(e) => e,
+        None if c.indefinite => c.range[1] - 1,
+        None => c.range[1],
+    }
+}
+
+/// Rewrite a definite container's header for `n` items. Indefinite (CBOR)
+/// containers have no count.
+fn header_splice(codec: &Codec, buf: &[u8], c: &Value, n: usize) -> Option<([usize; 2], Vec<u8>)> {
+    if c.indefinite {
+        return None;
+    }
+    let s = c.range[0];
+    let map = matches!(c.kind, ValueKind::Map(_));
+    let (len, head) = match codec {
+        Codec::Cbor => {
+            let len = match buf[s] & 0x1f {
+                24 => 2,
+                25 => 3,
+                26 => 5,
+                27 => 9,
+                _ => 1,
+            };
+            let mut head = Vec::new();
+            encode_value::cbor_head(if map { 5 } else { 4 }, n as u64, &mut head);
+            (len, head)
+        }
+        _ => {
+            let len = match buf[s] {
+                0xdc | 0xde => 3,
+                0xdd | 0xdf => 5,
+                _ => 1,
+            };
+            (len, encode_value::msgpack_container_head(map, n as u64))
+        }
+    };
+    Some(([s, s + len], head))
+}
+
+/// The decoded buffer of the innermost layer (what value ranges index).
+fn innermost_buf<'a>(node: &'a Node, buf: &'a [u8]) -> &'a [u8] {
+    match &node.detail {
+        Detail::Layer { decoded, child } => innermost_buf(child, decoded),
+        _ => buf,
+    }
 }
 
 /// The node at the end of the layer chain.
@@ -248,15 +595,33 @@ fn structural(v: &Value) -> ValueKind {
     }
 }
 
+// ---------------------------------------------------------------- rebuilding
+
 /// What to change, carried down through the layers.
 enum Edit<'a> {
-    /// A protobuf field by parsed path.
-    Field(&'a [(u32, usize)], &'a NewValue),
-    /// A CBOR/MessagePack value by `--get` path, and its new encoded item.
-    Value(&'a str, &'a [u8]),
-    /// A DER element by child-index path (the first index picks a PEM
-    /// bundle's block), and its new encoded element.
-    Der(&'a [usize], &'a [u8]),
+    /// A protobuf edit: the path to the field (replace/delete) or to the
+    /// parent message (append; empty = top level).
+    Field(&'a [(u32, usize)], &'a FieldAction<'a>),
+    /// CBOR/MessagePack: sorted, non-overlapping byte replacements in the
+    /// value buffer.
+    Splices(&'a [([usize; 2], Vec<u8>)]),
+    /// DER: a child-index path (the first index picks a PEM bundle's block).
+    Der(&'a [usize], &'a DerAction<'a>),
+}
+
+enum FieldAction<'a> {
+    Replace(&'a NewValue),
+    Delete,
+    /// Encoded field bytes (tag included) to append.
+    Append(&'a [u8]),
+}
+
+enum DerAction<'a> {
+    /// A complete new element.
+    Replace(&'a [u8]),
+    Delete,
+    /// A complete element, inserted before the index (or appended at the end).
+    Insert(&'a [u8]),
 }
 
 fn verify_failed(why: &str) -> Diag {
@@ -277,25 +642,28 @@ fn unsupported(what: impl Into<String>) -> Diag {
 /// Re-encode `node` (parsed from `buf`) with `edit` applied.
 fn rebuild(node: &Node, buf: &[u8], edit: &Edit<'_>) -> Result<Vec<u8>, Diag> {
     match (&node.detail, edit) {
-        (Detail::Message { fields }, Edit::Field(segs, v)) => {
+        (Detail::Message { fields }, Edit::Field(segs, action)) => {
             let mut out = Vec::with_capacity(buf.len());
-            edit_fields(buf, [0, buf.len()], fields, segs, v, &mut out)?;
+            edit_fields(buf, [0, buf.len()], fields, segs, action, &mut out)?;
             Ok(out)
         }
-        (Detail::Values { .. }, Edit::Value(path, item)) => {
-            let [s, e] = crate::select_value(node, path)?.untagged().range;
-            let mut out = Vec::with_capacity(buf.len() + item.len());
-            out.extend_from_slice(&buf[..s]);
-            out.extend_from_slice(item);
-            out.extend_from_slice(&buf[e..]);
+        (Detail::Values { .. }, Edit::Splices(splices)) => {
+            let mut out = Vec::with_capacity(buf.len());
+            let mut at = 0;
+            for ([s, e], bytes) in splices.iter() {
+                out.extend_from_slice(&buf[at..*s]);
+                out.extend_from_slice(bytes);
+                at = *e;
+            }
+            out.extend_from_slice(&buf[at..]);
             Ok(out)
         }
-        (Detail::Der { items }, Edit::Der(segs, elem)) => {
-            let mut out = Vec::with_capacity(buf.len() + elem.len());
-            der_splice(buf, [0, buf.len()], items, segs, elem, &mut out);
+        (Detail::Der { items }, Edit::Der(segs, action)) => {
+            let mut out = Vec::with_capacity(buf.len());
+            der_splice(buf, [0, buf.len()], items, segs, action, &mut out);
             Ok(out)
         }
-        (Detail::Parts { parts, .. }, Edit::Der(segs, elem)) if node.codec == Codec::Bundle => {
+        (Detail::Parts { parts, .. }, Edit::Der(segs, action)) if node.codec == Codec::Bundle => {
             // The first index picks the block; only that block is re-encoded.
             let part = &parts[segs[0]];
             let (Codec::Pem { label }, Detail::Layer { decoded, child }) =
@@ -303,7 +671,7 @@ fn rebuild(node: &Node, buf: &[u8], edit: &Edit<'_>) -> Result<Vec<u8>, Diag> {
             else {
                 return Err(unsupported("a bundle part is not a PEM block"));
             };
-            let der = rebuild(child, decoded, &Edit::Der(&segs[1..], elem))?;
+            let der = rebuild(child, decoded, &Edit::Der(&segs[1..], action))?;
             let t = std::str::from_utf8(buf)
                 .map_err(|_| unsupported("the bundle's original text is not UTF-8"))?;
             Ok(reencode::pem_like(t, part.range, label, &der)?.into_bytes())
@@ -353,17 +721,25 @@ fn encode_layer(codec: &Codec, orig: &[u8], inner: &[u8]) -> Result<Vec<u8>, Dia
     })
 }
 
-/// Copy `buf[region]` to `out`, replacing the field selected by `segs`.
-/// Field ranges are absolute in `buf` (nested messages share the buffer).
+/// Copy `buf[region]` to `out`, applying `action` at `segs`. Field ranges
+/// are absolute in `buf` (nested messages share the buffer). For an append,
+/// `segs` is the parent message's path and may be empty.
 fn edit_fields(
     buf: &[u8],
     region: [usize; 2],
     fields: &[Field],
     segs: &[(u32, usize)],
-    v: &NewValue,
+    action: &FieldAction<'_>,
     out: &mut Vec<u8>,
 ) -> Result<(), Diag> {
-    let (num, idx) = segs[0];
+    let Some(&(num, idx)) = segs.first() else {
+        // The target message itself: only reached for an append.
+        out.extend_from_slice(&buf[region[0]..region[1]]);
+        if let FieldAction::Append(bytes) = action {
+            out.extend_from_slice(bytes);
+        }
+        return Ok(());
+    };
     let f = fields
         .iter()
         .filter(|f| f.number == num)
@@ -373,25 +749,30 @@ fn edit_fields(
     let (_, tag_len) = varint::decode(&buf[fs..fe]).expect("parsed tag");
     let tag = &buf[fs..fs + tag_len];
     out.extend_from_slice(&buf[region[0]..fs]);
-    out.extend_from_slice(tag);
     let rest = &segs[1..];
-    match &f.value {
-        _ if rest.is_empty() => {
+    match (&f.value, action) {
+        (_, FieldAction::Delete) if rest.is_empty() => {}
+        (_, FieldAction::Replace(v)) if rest.is_empty() => {
             let payload = encode_payload(f, v)?;
+            out.extend_from_slice(tag);
             if matches!(f.value, FieldValue::Len { .. }) {
                 out.extend_from_slice(&varint::encode(payload.len() as u64));
             }
             out.extend_from_slice(&payload);
         }
-        FieldValue::Group { fields: inner } => {
+        (FieldValue::Group { fields: inner }, _) => {
             // Start tag, fields, end tag: only the fields change.
             let end_tag = varint::encode(u64::from(num) << 3 | 4).len();
-            edit_fields(buf, [fs + tag_len, fe - end_tag], inner, rest, v, out)?;
+            out.extend_from_slice(tag);
+            edit_fields(buf, [fs + tag_len, fe - end_tag], inner, rest, action, out)?;
             out.extend_from_slice(&buf[fe - end_tag..fe]);
         }
-        FieldValue::Len {
-            data_range, alts, ..
-        } => {
+        (
+            FieldValue::Len {
+                data_range, alts, ..
+            },
+            _,
+        ) => {
             let [ds, de] = *data_range;
             // Enter the same interpretation as `select`: the first message
             // alt, or a string whose decoded layers end in a message.
@@ -400,13 +781,13 @@ fn edit_fields(
             for a in alts {
                 match &a.kind {
                     AltKind::Message(sub) => {
-                        edit_fields(buf, [ds, de], sub, rest, v, &mut inner)?;
+                        edit_fields(buf, [ds, de], sub, rest, action, &mut inner)?;
                         entered = true;
                     }
                     AltKind::String {
                         decoded: Some(n), ..
                     } if message_fields(n).is_some() => {
-                        inner = rebuild(n, &buf[ds..de], &Edit::Field(rest, v))?;
+                        inner = rebuild(n, &buf[ds..de], &Edit::Field(rest, action))?;
                         entered = true;
                     }
                     _ => continue,
@@ -416,6 +797,7 @@ fn edit_fields(
             if !entered {
                 unreachable!("path was validated by select");
             }
+            out.extend_from_slice(tag);
             out.extend_from_slice(&varint::encode(inner.len() as u64));
             out.extend_from_slice(&inner);
         }
@@ -500,46 +882,159 @@ fn encode_payload(f: &Field, v: &NewValue) -> Result<Vec<u8>, Diag> {
 
 // ---------------------------------------------------------------- DER
 
-/// `set` on DER. The element keeps its tag; its content is encoded for its
-/// type, and the length of every enclosing element (including encapsulating
-/// BIT/OCTET STRINGs) is rewritten.
-fn set_der(
-    root: &Node,
-    input: &[u8],
-    opts: &Options,
-    path: &str,
-    value: &NewValue,
-) -> Result<Vec<u8>, Diag> {
-    let target = crate::select_der(root, path)?;
-    let content = der_content(target, value)?;
-    let mut elem = der_tag_bytes(target, input_for(root, input, target)).to_vec();
-    elem.extend_from_slice(&der_length(content.len()));
-    elem.extend_from_slice(&content);
+/// Edits on DER. A changed element keeps its tag and its content is encoded
+/// for its type; an added element is one complete element given as bytes.
+/// The length of every enclosing element (including encapsulating BIT/OCTET
+/// STRINGs) is rewritten.
+fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+    let path = match op {
+        Op::Set(p, _) | Op::Add(p, _) | Op::Del(p) => p,
+    };
     let segs: Vec<usize> = path
         .split('.')
-        .map(|p| p.parse().expect("validated by select_der"))
-        .collect();
-    let out = rebuild(root, input, &Edit::Der(&segs, &elem))?;
-
-    let again = crate::peel(&out, opts)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
-    if !crate::is_der(&again) {
-        return Err(verify_failed("the data no longer decodes as DER"));
-    }
-    let got = crate::select_der(&again, path)
-        .map_err(|e| verify_failed(&format!("{}: {}", e.code, e.message)))?;
-    let bit_string = target.class == TagClass::Universal && target.number == 3;
-    let expected = if bit_string {
-        &content[1..]
-    } else {
-        &content[..]
+        .map(|p| {
+            p.parse().map_err(|_| {
+                Diag::new(
+                    "BAD_PATH",
+                    format!("invalid path segment '{p}' (DER paths are child indices, e.g. 0.0.6)"),
+                    None,
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let prefix = &segs[..segs.len() - 1];
+    let need_der = |again: &Node| {
+        if crate::is_der(again) {
+            Ok(())
+        } else {
+            Err(verify_failed("the data no longer decodes as DER"))
+        }
     };
-    if (got.class, got.number, got.constructed) != (target.class, target.number, false)
-        || got.payload().as_deref() != Some(expected)
-    {
-        return Err(verify_failed("the element does not hold the new value"));
+    match op {
+        Op::Set(_, value) => {
+            let target = crate::select_der(root, path)?;
+            let content = der_content(target, value)?;
+            let mut elem = der_tag_bytes(target, input_for(root, input, target)).to_vec();
+            elem.extend_from_slice(&der_length(content.len()));
+            elem.extend_from_slice(&content);
+            let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Replace(&elem)))?;
+            let again = reparse(&out, opts)?;
+            need_der(&again)?;
+            let got = crate::select_der(&again, path).map_err(vf)?;
+            let bit_string = target.class == TagClass::Universal && target.number == 3;
+            let expected = if bit_string {
+                &content[1..]
+            } else {
+                &content[..]
+            };
+            if (got.class, got.number, got.constructed) != (target.class, target.number, false)
+                || got.payload().as_deref() != Some(expected)
+            {
+                return Err(verify_failed("the element does not hold the new value"));
+            }
+            Ok(out)
+        }
+        Op::Del(_) => {
+            crate::select_der(root, path)?;
+            let before = der_children(root, prefix)?.len();
+            let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Delete))?;
+            let again = reparse(&out, opts)?;
+            need_der(&again)?;
+            if der_children(&again, prefix).map_err(vf)?.len() + 1 != before {
+                return Err(verify_failed("the element was not removed"));
+            }
+            Ok(out)
+        }
+        Op::Add(_, value) => {
+            let before = der_children(root, prefix)?.len();
+            let idx = segs[segs.len() - 1];
+            if idx > before {
+                return Err(Diag::new(
+                    "PATH_NOT_FOUND",
+                    format!("index {idx} is past the end (there are {before} elements)"),
+                    None,
+                ));
+            }
+            let NewValue::Bytes(elem) = value else {
+                return Err(Diag::new(
+                    "TYPE_MISMATCH",
+                    "an added DER element is one complete element as hex:.. or b64:.. (e.g. hex:020105)",
+                    None,
+                ));
+            };
+            let mut st = der::Stats::default();
+            let parsed = match der::parse(elem, &mut st) {
+                Ok(items) if items.len() == 1 => items.into_iter().next().expect("one item"),
+                _ => {
+                    return Err(Diag::new(
+                        "BAD_VALUE",
+                        "the added bytes are not exactly one complete DER element",
+                        None,
+                    ));
+                }
+            };
+            let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Insert(elem)))?;
+            let again = reparse(&out, opts)?;
+            need_der(&again)?;
+            let got = crate::select_der(&again, path).map_err(vf)?;
+            if (got.class, got.number, got.constructed, got.payload())
+                != (
+                    parsed.class,
+                    parsed.number,
+                    parsed.constructed,
+                    parsed.payload(),
+                )
+                || der_children(&again, prefix).map_err(vf)?.len() != before + 1
+            {
+                return Err(verify_failed("the new element is not where it should be"));
+            }
+            Ok(out)
+        }
     }
-    Ok(out)
+}
+
+/// The elements under `prefix`: the top-level elements when it is empty (for
+/// a PEM bundle, the first index picks the block).
+fn der_children<'a>(root: &'a Node, prefix: &[usize]) -> Result<&'a [Asn1], Diag> {
+    let (mut items, rest) = match bundle_parts(root) {
+        Some(parts) => {
+            let Some((&block, rest)) = prefix.split_first() else {
+                return Err(unsupported(
+                    "adding or removing whole PEM blocks is not supported",
+                ));
+            };
+            let part = parts.get(block).ok_or_else(|| {
+                Diag::new("PATH_NOT_FOUND", format!("no bundle block {block}"), None)
+            })?;
+            let items = der_items(part).ok_or_else(|| {
+                Diag::new(
+                    "PATH_NOT_MESSAGE",
+                    format!("bundle block {block} is not DER"),
+                    None,
+                )
+            })?;
+            (items, rest)
+        }
+        None => (
+            der_items(root).ok_or_else(|| {
+                Diag::new("PATH_NOT_MESSAGE", "the input did not decode to DER", None)
+            })?,
+            prefix,
+        ),
+    };
+    for &i in rest {
+        let e = items
+            .get(i)
+            .ok_or_else(|| Diag::new("PATH_NOT_FOUND", format!("no element at index {i}"), None))?;
+        items = e.children().ok_or_else(|| {
+            Diag::new(
+                "PATH_NOT_MESSAGE",
+                format!("element {} has no children", e.tag_name()),
+                None,
+            )
+        })?;
+    }
+    Ok(items)
 }
 
 /// The DER buffer `target` was parsed from: the decoded bytes of the layer
@@ -601,41 +1096,59 @@ fn der_length(n: usize) -> Vec<u8> {
     out
 }
 
-/// Copy `buf[region]` to `out`, replacing the element at `segs` with `elem`
-/// and re-encoding the length of every element on the way down.
+/// Copy `buf[region]` to `out`, applying `action` at `segs` and re-encoding
+/// the length of every element on the way down.
 fn der_splice(
     buf: &[u8],
     region: [usize; 2],
     items: &[Asn1],
     segs: &[usize],
-    elem: &[u8],
+    action: &DerAction<'_>,
     out: &mut Vec<u8>,
 ) {
-    let e = &items[segs[0]];
-    out.extend_from_slice(&buf[region[0]..e.range[0]]);
+    let idx = segs[0];
     if segs.len() == 1 {
-        out.extend_from_slice(elem);
-    } else {
-        let children = e.children().expect("validated by select_der");
-        let [cs, ce] = e.content;
-        // An encapsulating BIT STRING keeps its unused-bits byte.
-        let prefix = matches!(
-            e.value,
-            Asn1Value::Encapsulated {
-                unused_bits: Some(_),
-                ..
+        if let DerAction::Insert(elem) = action {
+            if idx == items.len() {
+                out.extend_from_slice(&buf[region[0]..region[1]]);
+                out.extend_from_slice(elem);
+                return;
             }
-        );
-        let mut content = Vec::new();
-        if prefix {
-            content.push(buf[cs]);
         }
-        let start = if prefix { cs + 1 } else { cs };
-        der_splice(buf, [start, ce], children, &segs[1..], elem, &mut content);
-        out.extend_from_slice(der_tag_bytes(e, buf));
-        out.extend_from_slice(&der_length(content.len()));
-        out.extend_from_slice(&content);
+        let e = &items[idx];
+        out.extend_from_slice(&buf[region[0]..e.range[0]]);
+        match action {
+            DerAction::Replace(elem) => out.extend_from_slice(elem),
+            DerAction::Delete => {}
+            DerAction::Insert(elem) => {
+                out.extend_from_slice(elem);
+                out.extend_from_slice(&buf[e.range[0]..e.range[1]]);
+            }
+        }
+        out.extend_from_slice(&buf[e.range[1]..region[1]]);
+        return;
     }
+    let e = &items[idx];
+    out.extend_from_slice(&buf[region[0]..e.range[0]]);
+    let children = e.children().expect("validated by the caller");
+    let [cs, ce] = e.content;
+    // An encapsulating BIT STRING keeps its unused-bits byte.
+    let prefix = matches!(
+        e.value,
+        Asn1Value::Encapsulated {
+            unused_bits: Some(_),
+            ..
+        }
+    );
+    let mut content = Vec::new();
+    if prefix {
+        content.push(buf[cs]);
+    }
+    let start = if prefix { cs + 1 } else { cs };
+    der_splice(buf, [start, ce], children, &segs[1..], action, &mut content);
+    out.extend_from_slice(der_tag_bytes(e, buf));
+    out.extend_from_slice(&der_length(content.len()));
+    out.extend_from_slice(&content);
     out.extend_from_slice(&buf[e.range[1]..region[1]]);
 }
 

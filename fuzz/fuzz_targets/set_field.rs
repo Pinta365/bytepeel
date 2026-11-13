@@ -1,10 +1,11 @@
-//! `bytepeel set`: `path\0value\0input`. Must never panic; a successful edit
-//! must decode back to a tree where the path holds the new value (`set`
-//! verifies this itself, so an Ok result is re-checked here independently).
+//! `bytepeel set`: `path\0value\0input`. The first byte of the path picks the
+//! operation: `+` add, `-` delete, otherwise change. Must never panic; a
+//! successful change or add must decode back to a tree where the path exists
+//! (the library verifies this itself; this re-checks it independently).
 #![no_main]
 
 use bytepeel_core::{
-    Options, is_der, is_values, parse_value, peel, select, select_der, select_value, set,
+    Op, Options, edit, is_der, is_values, parse_value, peel, select, select_der, select_value,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -16,9 +17,31 @@ fuzz_target!(|data: &[u8]| {
     let (Ok(path), Ok(value)) = (std::str::from_utf8(path), std::str::from_utf8(value)) else {
         return;
     };
-    let Ok(v) = parse_value(value) else { return };
+    let (op, path) = match path.as_bytes().first() {
+        Some(b'+') => ("add", &path[1..]),
+        Some(b'-') => ("del", &path[1..]),
+        _ => ("set", path),
+    };
+    let op = match op {
+        "del" => Op::Del(path.to_string()),
+        kind => {
+            let Ok(v) = parse_value(value) else { return };
+            if kind == "add" {
+                Op::Add(path.to_string(), v)
+            } else {
+                Op::Set(path.to_string(), v)
+            }
+        }
+    };
     let opts = Options::default();
-    if let Ok(out) = set(input, &opts, path, &v) {
+    let result = edit(input, &opts, &op);
+    if matches!(op, Op::Del(_)) {
+        if let Ok(out) = result {
+            let _ = peel(&out, &opts).expect("auto-detection never fails");
+        }
+        return;
+    }
+    if let Ok(out) = result {
         let n = peel(&out, &opts).expect("auto-detection never fails");
         // The same dispatch as the CLI: value trees use value paths.
         let found = if is_values(&n) {

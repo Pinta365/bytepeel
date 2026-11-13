@@ -65,7 +65,7 @@ fn cbor_int(n: i128) -> Result<Vec<u8>, Diag> {
 }
 
 /// A minimal CBOR header for `major` with the given argument.
-fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
+pub(crate) fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
     let m = major << 5;
     if n < 24 {
         out.push(m | n as u8);
@@ -229,6 +229,18 @@ fn msgpack_int(n: i128) -> Result<Vec<u8>, Diag> {
             out.extend_from_slice(&n.to_be_bytes());
             Ok(out)
         }
+    }
+}
+
+/// A MessagePack array or map header for `n` items (minimal form).
+pub(crate) fn msgpack_container_head(map: bool, n: u64) -> Vec<u8> {
+    match (map, n) {
+        (false, 0..=15) => vec![0x90 | n as u8],
+        (true, 0..=15) => vec![0x80 | n as u8],
+        (false, 16..=0xffff) => [&[0xdc][..], &(n as u16).to_be_bytes()].concat(),
+        (true, 16..=0xffff) => [&[0xde][..], &(n as u16).to_be_bytes()].concat(),
+        (false, _) => [&[0xdd][..], &(n as u32).to_be_bytes()].concat(),
+        (true, _) => [&[0xdf][..], &(n as u32).to_be_bytes()].concat(),
     }
 }
 

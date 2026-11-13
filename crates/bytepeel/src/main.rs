@@ -8,10 +8,16 @@ bytepeel - peel layers of encoding off binary data
 
 USAGE:
     bytepeel [OPTIONS] [FILE]      (reads stdin when FILE is omitted or '-')
-    bytepeel [OPTIONS] set PATH=VALUE... [FILE]
-                                   Change protobuf fields and re-encode every layer
-                                   (hex, base64, PEM, gzip, ...) in its original style.
-                                   Writes the new data to stdout.
+    bytepeel [OPTIONS] set EDIT... [FILE]
+                                   Edit protobuf fields, CBOR/MessagePack values or DER
+                                   elements and re-encode every layer (hex, base64, PEM,
+                                   gzip, ...) in its original style. Writes the new data
+                                   to stdout. Edits apply in order:
+                                     PATH=VALUE   change
+                                     PATH+=VALUE  add: protobuf field PARENT.N, map key,
+                                                  array index (insert), DER index (insert;
+                                                  VALUE = one element as hex:/b64:)
+                                     --del PATH   remove
 
 OPTIONS:
     --in <auto|hex|base64|raw>     How to read the input (default: auto)
@@ -29,10 +35,12 @@ SET VALUES:
     42, -2                         integer (negative: 10-byte two's complement varint)
     sint:-2                        zigzag (sint32/sint64)
     1.5, float:NaN                 float (I32 fields: float32, I64 fields: double)
-    true, false                    bool
+    true, false, null              bool / null (null: CBOR, MessagePack, DER NULL)
     \"text\", str:text               string (the quoted form takes JSON escapes)
     hex:0a0b, b64:CgM=             bytes
-    The field keeps its wire type. The output is decoded again and checked.
+    Protobuf fields keep their wire type; DER elements keep their tag; CBOR and
+    MessagePack values may change type. New protobuf fields: integers -> VARINT,
+    floats -> double, text/bytes -> LEN. The output is decoded again and checked.
 
 EXIT CODES:
     0 success, 1 decode error, 2 usage or I/O error.
@@ -49,7 +57,9 @@ enum Format {
 struct Args {
     file: Option<String>,
     /// `set` mode: (path, value) assignments, applied in order.
-    set: Option<Vec<(String, core::NewValue)>>,
+    set: Option<Vec<core::Op>>,
+    /// `--del` paths seen before `set` (checked after parsing).
+    pending_del: Vec<String>,
     opts: Options,
     get: Option<String>,
     format: Format,
@@ -74,6 +84,7 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
     let mut args = Args {
         file: None,
         set: None,
+        pending_del: Vec::new(),
         opts: Options::default(),
         get: None,
         format: Format::Json,
@@ -131,6 +142,13 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             "--depth" => args.opts.depth = parse_num(&value()?, "--depth")?,
             "--alts" => args.opts.alts = parse_num(&value()?, "--alts")?,
             "--get" => args.get = Some(value()?),
+            "--del" => {
+                let p = value()?;
+                match args.set.as_mut() {
+                    Some(ops) => ops.push(core::Op::Del(p)),
+                    None => args.pending_del.push(p),
+                }
+            }
             "--format" => {
                 args.format = match value()?.as_str() {
                     "json" => Format::Json,
@@ -152,10 +170,11 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             _ if args.set.is_some() && a.contains('=') => {
                 let (path, v) = a.split_once('=').expect("contains '='");
                 let value = core::parse_value(v)?;
-                args.set
-                    .as_mut()
-                    .expect("set mode")
-                    .push((path.to_string(), value));
+                let op = match path.strip_suffix('+') {
+                    Some(p) => core::Op::Add(p.to_string(), value),
+                    None => core::Op::Set(path.to_string(), value),
+                };
+                args.set.as_mut().expect("set mode").push(op);
             }
             _ => {
                 if args.file.is_some() {
@@ -165,10 +184,26 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             }
         }
     }
+    if !args.pending_del.is_empty() {
+        match args.set.as_mut() {
+            Some(ops) => {
+                let dels = std::mem::take(&mut args.pending_del);
+                for (i, p) in dels.into_iter().enumerate() {
+                    ops.insert(i, core::Op::Del(p));
+                }
+            }
+            None => {
+                return Err(usage(
+                    "--del is only valid with set (bytepeel set --del PATH FILE)",
+                ));
+            }
+        }
+    }
     if let Some(set) = &args.set {
         if set.is_empty() {
             return Err(usage(
-                "set needs at least one PATH=VALUE (e.g. bytepeel set 1.3=42 FILE)",
+                "set needs at least one edit: PATH=VALUE, PATH+=VALUE or --del PATH \
+                 (e.g. bytepeel set 1.3=42 FILE)",
             ));
         }
         if args.get.is_some() || args.format != Format::Json {
@@ -229,8 +264,8 @@ fn main() -> ExitCode {
     };
     if let Some(set) = &args.set {
         let mut data = input;
-        for (path, value) in set {
-            data = match core::set(&data, &args.opts, path, value) {
+        for op in set {
+            data = match core::edit(&data, &args.opts, op) {
                 Ok(d) => d,
                 Err(e) => return fail(&e, 1),
             };

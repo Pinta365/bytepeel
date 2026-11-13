@@ -158,3 +158,29 @@ fn set_on_der() {
     assert_eq!(code, 1);
     assert!(err.contains(r#""code":"TYPE_MISMATCH""#), "{err}");
 }
+
+#[test]
+fn set_add_and_delete() {
+    // Edits apply in order: add field 3, delete field 2.
+    let (code, out, err) = run(
+        &["set", "3+=42", "--del", "2"],
+        b"08 96 01 12 03 66 6f 6f\n",
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"08 96 01 18 2a\n");
+    // --del may come before set.
+    let (code, out, _) = run(&["--del", "1", "set"], b"08 01 10 02");
+    assert_eq!(code, 0);
+    assert_eq!(out, b"10 02");
+    // CBOR: add a key, insert into an array, delete from it.
+    let (code, out, _) = run(
+        &["set", "b+=true", "a.1+=9", "--del", "a.0"],
+        b"a1 61 61 82 01 02",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out, b"a2 61 61 82 09 02 61 62 f5");
+    // --del without set is a usage error.
+    let (code, _, err) = run(&["--del", "1"], b"0801");
+    assert_eq!(code, 2);
+    assert!(err.contains("USAGE"), "{err}");
+}

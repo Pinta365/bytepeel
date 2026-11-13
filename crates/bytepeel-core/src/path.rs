@@ -96,7 +96,7 @@ pub(crate) fn message_fields(node: &Node) -> Option<&[Field]> {
     }
 }
 
-fn field_children(f: &Field) -> Option<&[Field]> {
+pub(crate) fn field_children(f: &Field) -> Option<&[Field]> {
     match &f.value {
         FieldValue::Group { fields } => Some(fields),
         FieldValue::Len { alts, .. } => alts.iter().find_map(|a| match &a.kind {
@@ -244,26 +244,27 @@ pub fn select_value<'a>(root: &'a Node, path: &str) -> Result<&'a Value, Diag> {
 }
 
 fn map_lookup<'a>(entries: &'a [(Value, Value)], seg: &str) -> Option<&'a Value> {
-    for (k, v) in entries {
-        if let ValueKind::Text(t) = &k.untagged().kind {
-            if t == seg {
-                return Some(v);
-            }
-        }
+    map_index(entries, seg).map(|i| &entries[i].1)
+}
+
+/// The entry a path segment selects: a text key equal to it, else an integer
+/// key equal to it.
+pub(crate) fn map_index(entries: &[(Value, Value)], seg: &str) -> Option<usize> {
+    let text = entries
+        .iter()
+        .position(|(k, _)| matches!(&k.untagged().kind, ValueKind::Text(t) if t == seg));
+    if text.is_some() {
+        return text;
     }
-    if let Ok(want) = seg.parse::<i128>() {
-        for (k, v) in entries {
-            let key = match &k.untagged().kind {
-                ValueKind::Uint(n) => Some(*n as i128),
-                ValueKind::Nint(n) => Some(-(*n as i128) - 1),
-                _ => None,
-            };
-            if key == Some(want) {
-                return Some(v);
-            }
-        }
-    }
-    None
+    let want = seg.parse::<i128>().ok()?;
+    entries.iter().position(|(k, _)| {
+        let key = match &k.untagged().kind {
+            ValueKind::Uint(n) => Some(*n as i128),
+            ValueKind::Nint(n) => Some(-(*n as i128) - 1),
+            _ => None,
+        };
+        key == Some(want)
+    })
 }
 
 fn prefix_str(segs: &[&str], n: usize) -> String {
@@ -290,7 +291,7 @@ pub fn is_values(node: &Node) -> bool {
     values_items(node).is_some()
 }
 
-fn values_items(node: &Node) -> Option<&[Value]> {
+pub(crate) fn values_items(node: &Node) -> Option<&[Value]> {
     match &node.detail {
         Detail::Values { items } => Some(items),
         Detail::Layer { child, .. } => values_items(child),
@@ -308,7 +309,7 @@ pub fn is_der(node: &Node) -> bool {
 }
 
 /// The parts of a PEM bundle node, if `node` (after text layers) is one.
-fn bundle_parts(node: &Node) -> Option<&[Node]> {
+pub(crate) fn bundle_parts(node: &Node) -> Option<&[Node]> {
     match &node.detail {
         Detail::Parts { parts, .. } if matches!(node.codec, Codec::Bundle) => Some(parts),
         Detail::Layer { child, .. } => bundle_parts(child),
@@ -316,7 +317,7 @@ fn bundle_parts(node: &Node) -> Option<&[Node]> {
     }
 }
 
-fn der_items(node: &Node) -> Option<&[Asn1]> {
+pub(crate) fn der_items(node: &Node) -> Option<&[Asn1]> {
     match &node.detail {
         Detail::Der { items } => Some(items),
         Detail::Layer { child, .. } => der_items(child),

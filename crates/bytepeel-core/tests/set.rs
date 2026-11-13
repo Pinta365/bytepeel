@@ -569,3 +569,251 @@ fn der_errors() {
     assert_eq!(code("0603550403", "0", "\"3.1\""), "BAD_VALUE");
     assert_eq!(code("020105", "1", "1"), "PATH_NOT_FOUND");
 }
+
+// ------------------------------------------------------------ add / delete
+
+fn op(input: &[u8], opts: &Options, op: Op) -> Result<Vec<u8>, Diag> {
+    edit(input, opts, &op)
+}
+
+fn add(path: &str, v: &str) -> Op {
+    Op::Add(path.into(), parse_value(v).unwrap())
+}
+
+fn del(path: &str) -> Op {
+    Op::Del(path.into())
+}
+
+#[test]
+fn protobuf_add_fields() {
+    let d = Options::default();
+    // Top level: appended at the end, wire type from the value.
+    assert_eq!(op(b"089601", &d, add("3", "42")).unwrap(), b"089601182a");
+    assert_eq!(
+        op(b"089601", &d, add("2", "str:hi")).unwrap(),
+        b"08960112026869"
+    );
+    assert_eq!(
+        op(b"089601", &d, add("4", "1.5")).unwrap(),
+        b"08960121000000000000f83f"
+    );
+    assert_eq!(
+        op(b"089601", &d, add("5", "sint:-1")).unwrap(),
+        b"0896012801"
+    );
+    // A second occurrence of an existing field number is appended too.
+    assert_eq!(op(b"089601", &d, add("1", "2")).unwrap(), b"0896010802");
+    // Into a nested message: field 3's length grows from 3 to 5.
+    assert_eq!(
+        op(b"1a03089601", &d, add("3.2", "7")).unwrap(),
+        b"1a050896011007"
+    );
+    // Into a group.
+    assert_eq!(
+        op(b"0b10010c", &d, add("1.3", "7")).unwrap(),
+        b"0b100118070c"
+    );
+}
+
+#[test]
+fn protobuf_add_inside_base64_string() {
+    let inner = h("0a0c68656c6c6f20776f726c6421 1007");
+    let s = b64(&inner);
+    let mut outer = vec![0x0a, s.len() as u8];
+    outer.extend_from_slice(s.as_bytes());
+    let text = b64(&outer);
+    let out = op(text.as_bytes(), &Options::default(), add("1.3", "99")).unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    assert_eq!(uint(field(&n, "1.3")), 99);
+    assert_eq!(uint(field(&n, "1.2")), 7);
+}
+
+#[test]
+fn protobuf_delete_fields() {
+    let d = Options::default();
+    assert_eq!(
+        op(b"0801 1203666f6f 1802", &d, del("2")).unwrap(),
+        b"0801 1802"
+    );
+    // A repeated field by index; the others stay in order.
+    assert_eq!(
+        op(b"0801 0802 0803", &d, del("1[1]")).unwrap(),
+        b"0801 0803"
+    );
+    // Nested: the parent length shrinks.
+    assert_eq!(
+        op(b"1a050896011007", &d, del("3.2")).unwrap(),
+        b"1a03089601"
+    );
+}
+
+#[test]
+fn protobuf_add_delete_errors() {
+    let d = Options::default();
+    let code = |input: &[u8], o: Op| op(input, &d, o).unwrap_err().code;
+    assert_eq!(code(b"089601", add("2[1]", "1")), "BAD_PATH");
+    assert_eq!(code(b"089601", add("0", "1")), "FIELD_NUMBER_ZERO");
+    assert_eq!(
+        code(b"089601", add("536870912", "1")),
+        "FIELD_NUMBER_TOO_LARGE"
+    );
+    assert_eq!(code(b"089601", add("2", "null")), "TYPE_MISMATCH");
+    assert_eq!(code(b"089601", add("1.2", "1")), "PATH_NOT_MESSAGE");
+    assert_eq!(code(b"089601", del("2")), "PATH_NOT_FOUND");
+}
+
+#[test]
+fn cbor_add_and_delete() {
+    let c = cbor_opts();
+    // {"a": [1, 2]}
+    let m = h("a1 6161 82 01 02");
+    assert_eq!(
+        op(&m, &c, add("b", "true")).unwrap(),
+        h("a2 6161 82 01 02 6162 f5")
+    );
+    assert_eq!(
+        op(&m, &c, add("a.0", "0")).unwrap(),
+        h("a1 6161 83 00 01 02")
+    );
+    assert_eq!(
+        op(&m, &c, add("a.1", "9")).unwrap(),
+        h("a1 6161 83 01 09 02")
+    );
+    assert_eq!(
+        op(&m, &c, add("a.2", "3")).unwrap(),
+        h("a1 6161 83 01 02 03")
+    );
+    assert_eq!(op(&m, &c, del("a.0")).unwrap(), h("a1 6161 81 02"));
+    assert_eq!(op(&m, &c, del("a")).unwrap(), h("a0"));
+    // Into an empty container.
+    assert_eq!(op(&h("a0"), &c, add("k", "1")).unwrap(), h("a1 616b 01"));
+    assert_eq!(op(&h("80"), &c, add("0", "1")).unwrap(), h("81 01"));
+    // Errors.
+    assert_eq!(
+        op(&m, &c, add("a", "1")).unwrap_err().code,
+        "ALREADY_EXISTS"
+    );
+    assert_eq!(
+        op(&m, &c, add("a.3", "1")).unwrap_err().code,
+        "PATH_NOT_FOUND"
+    );
+    assert_eq!(op(&m, &c, add("a.x", "1")).unwrap_err().code, "BAD_PATH");
+    assert_eq!(
+        op(&m, &c, add("a.0.z", "1")).unwrap_err().code,
+        "PATH_NOT_MESSAGE"
+    );
+}
+
+#[test]
+fn cbor_header_grows_and_indefinite_containers_keep_their_break() {
+    let c = cbor_opts();
+    // A 23-item array (header 0x97) gains an item: header becomes 98 18.
+    let mut arr = vec![0x97];
+    arr.extend(std::iter::repeat_n(0x01, 23));
+    let out = op(&arr, &c, add("23", "2")).unwrap();
+    assert_eq!(&out[..2], &[0x98, 24]);
+    assert_eq!(out.len(), 2 + 24);
+    // And shrinks back.
+    assert_eq!(op(&out, &c, del("23")).unwrap(), arr);
+    // Indefinite: no count; items go before the break.
+    let ind = h("9f 01 02 ff");
+    assert_eq!(op(&ind, &c, add("2", "3")).unwrap(), h("9f 01 02 03 ff"));
+    assert_eq!(op(&ind, &c, del("0")).unwrap(), h("9f 02 ff"));
+    assert_eq!(op(&h("9f ff"), &c, add("0", "1")).unwrap(), h("9f 01 ff"));
+    // A tagged container keeps its tag.
+    assert_eq!(
+        op(&h("d9d9f7 a0"), &c, add("x", "1")).unwrap(),
+        h("d9d9f7 a1 6178 01")
+    );
+}
+
+#[test]
+fn msgpack_add_and_delete() {
+    let m = mp_opts();
+    let input = h("82 a161 01 a162 92 01 02");
+    assert_eq!(
+        op(&input, &m, add("c", "null")).unwrap(),
+        h("83 a161 01 a162 92 01 02 a163 c0")
+    );
+    assert_eq!(op(&input, &m, del("a")).unwrap(), h("81 a162 92 01 02"));
+    assert_eq!(
+        op(&input, &m, add("b.0", "str:z")).unwrap(),
+        h("82 a161 01 a162 93 a17a 01 02")
+    );
+    // fixmap with 15 entries -> map16 with 16.
+    let mut map = vec![0x8f];
+    for k in 0..15u8 {
+        map.extend([0xa1, b'a' + k, 0x01]);
+    }
+    let out = op(&map, &m, add("z", "1")).unwrap();
+    assert_eq!(&out[..3], &[0xde, 0x00, 0x10]);
+    assert_eq!(op(&out, &m, del("z")).unwrap(), map);
+}
+
+#[test]
+fn der_insert_and_delete() {
+    let d = der_opts();
+    let seq = h("3003 020105");
+    assert_eq!(
+        op(&seq, &d, add("0.1", "hex:0101ff")).unwrap(),
+        h("3006 020105 0101ff")
+    );
+    assert_eq!(
+        op(&seq, &d, add("0.0", "hex:0500")).unwrap(),
+        h("3005 0500 020105")
+    );
+    assert_eq!(
+        op(&h("3006 020105 0101ff"), &d, del("0.0")).unwrap(),
+        h("3003 0101ff")
+    );
+    // Into an encapsulating OCTET STRING: both lengths follow.
+    let oct = h("3007 0405 3003 020105");
+    assert_eq!(
+        op(&oct, &d, add("0.0.0.1", "hex:0500")).unwrap(),
+        h("3009 0407 3005 020105 0500")
+    );
+    // Errors.
+    let code = |o: Op| op(&seq, &d, o).unwrap_err().code;
+    assert_eq!(code(add("0.1", "5")), "TYPE_MISMATCH");
+    assert_eq!(code(add("0.1", "hex:0201")), "BAD_VALUE"); // truncated element
+    assert_eq!(code(add("0.1", "hex:05000500")), "BAD_VALUE"); // two elements
+    assert_eq!(code(add("0.2", "hex:0500")), "PATH_NOT_FOUND");
+    assert_eq!(code(add("0.0.0", "hex:0500")), "PATH_NOT_MESSAGE"); // INTEGER is primitive
+    assert_eq!(code(del("0.1")), "PATH_NOT_FOUND");
+}
+
+#[test]
+fn der_delete_a_certificate_extension() {
+    // ISRG Root X2 extensions: [3] { SEQUENCE { keyUsage, basicConstraints, SKI } }.
+    let n = peel(ISRG_X2.as_bytes(), &Options::default()).unwrap();
+    let before = select_der(&n, "0.0.7.0").unwrap().children().unwrap().len();
+    let out = op(ISRG_X2.as_bytes(), &Options::default(), del("0.0.7.0.0")).unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    assert_eq!(
+        select_der(&n, "0.0.7.0").unwrap().children().unwrap().len(),
+        before - 1
+    );
+    // In a bundle, only the addressed block changes.
+    let bundle = format!("{ISRG_X2}{ISRG_X2}");
+    let out =
+        String::from_utf8(op(bundle.as_bytes(), &Options::default(), del("1.0.0.7.0.0")).unwrap())
+            .unwrap();
+    assert!(out.starts_with(ISRG_X2));
+    let n = peel(out.as_bytes(), &Options::default()).unwrap();
+    assert_eq!(
+        select_der(&n, "1.0.0.7.0")
+            .unwrap()
+            .children()
+            .unwrap()
+            .len(),
+        before - 1
+    );
+    assert_eq!(
+        select_der(&n, "0.0.0.7.0")
+            .unwrap()
+            .children()
+            .unwrap()
+            .len(),
+        before
+    );
+}
