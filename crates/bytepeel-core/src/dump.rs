@@ -16,6 +16,9 @@ pub(crate) struct Dump {
     pub bytes: Vec<u8>,
     /// Which dump format this came from: `"xxd"` or `"hexdump"`.
     pub style: &'static str,
+    /// The offset of the first byte (`xxd -s` / `hexdump -s`). Zero for a
+    /// normal dump; the decoded `bytes` (and any child ranges) stay 0-based.
+    pub start: usize,
 }
 
 /// Decode `xxd` / `hexdump -C` text.
@@ -49,14 +52,18 @@ enum Style {
 
 /// Recognise the format from the first line. `None` means "not a dump".
 fn detect_style(line: &str) -> Option<Style> {
+    // The first line may start at any offset (`xxd -s`, `hexdump -s`). A
+    // nonzero start needs the tools' full 8-digit offset column, so numbered
+    // prose (`1: ab cd`, `2: ef 01`) is never read as a dump.
     let (offset, idx) = offset_prefix(line)?;
-    // A dump always starts at offset 0.
-    if offset != 0 {
+    if offset != 0 && idx < 8 {
         return None;
     }
     let rest = &line.as_bytes()[idx..];
     match rest {
-        [b':', ..] => Some(Style::Xxd),
+        // `xxd` always writes `offset: ` (colon then a space); requiring the
+        // space keeps colon-separated plain hex like `0a:14:0a:03` out.
+        [b':', b' ', ..] => Some(Style::Xxd),
         [b' ', b' ', ..] if line.contains('|') => Some(Style::Hexdump),
         _ => None,
     }
@@ -149,16 +156,19 @@ fn parse_hex_region(region: &str, base: usize, out: &mut Vec<u8>) -> Result<(), 
 
 fn parse_xxd(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
     let mut out = Vec::new();
-    let mut expected = 0usize;
-    for &(start, line) in lines {
+    // The dump may begin at a nonzero offset; every later line must follow on
+    // from it.
+    let start = offset_prefix(lines[0].1).map_or(0, |(offset, _)| offset);
+    let mut expected = start;
+    for &(line_start, line) in lines {
         let (offset, idx) = offset_prefix(line)
-            .ok_or_else(|| bad(start, "line does not start with a hex offset"))?;
+            .ok_or_else(|| bad(line_start, "line does not start with a hex offset"))?;
         if line.as_bytes().get(idx) != Some(&b':') {
-            return Err(bad(start, "expected ':' after the offset"));
+            return Err(bad(line_start, "expected ':' after the offset"));
         }
         if offset != expected {
             return Err(bad(
-                start,
+                line_start,
                 format!("offset 0x{offset:x} does not follow 0x{expected:x}"),
             ));
         }
@@ -167,28 +177,31 @@ fn parse_xxd(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
         let rest = &line[idx + 1..];
         let hex_end = rest.find("  ").unwrap_or(rest.len());
         let before = out.len();
-        parse_hex_region(&rest[..hex_end], start + idx + 1, &mut out)?;
+        parse_hex_region(&rest[..hex_end], line_start + idx + 1, &mut out)?;
         expected += out.len() - before;
     }
     Ok(Dump {
         bytes: out,
         style: "xxd",
+        start,
     })
 }
 
 fn parse_hexdump(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
     let mut out = Vec::new();
-    let mut expected = 0usize;
+    // Like `xxd`, the first line may start at a nonzero offset.
+    let start = offset_prefix(lines[0].1).map_or(0, |(offset, _)| offset);
+    let mut expected = start;
     let mut prev: Vec<u8> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        let (start, line) = lines[i];
+        let (line_start, line) = lines[i];
         if line.trim() == "*" {
             if prev.is_empty() {
-                return Err(bad(start, "'*' with no preceding data line"));
+                return Err(bad(line_start, "'*' with no preceding data line"));
             }
             let Some(&(next_start, next)) = lines.get(i + 1) else {
-                return Err(bad(start, "'*' is not followed by an offset"));
+                return Err(bad(line_start, "'*' is not followed by an offset"));
             };
             let (next_offset, _) = offset_prefix(next).ok_or_else(|| {
                 bad(
@@ -197,13 +210,16 @@ fn parse_hexdump(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
                 )
             })?;
             let Some(span) = next_offset.checked_sub(expected) else {
-                return Err(bad(start, "'*' repeats past the following offset"));
+                return Err(bad(line_start, "'*' repeats past the following offset"));
             };
             if span > MAX_REPEAT {
-                return Err(bad(start, "'*' repeat would expand past 64 MiB"));
+                return Err(bad(line_start, "'*' repeat would expand past 64 MiB"));
             }
             if span == 0 || span % prev.len() != 0 {
-                return Err(bad(start, "'*' repeat count does not fit the offset gap"));
+                return Err(bad(
+                    line_start,
+                    "'*' repeat count does not fit the offset gap",
+                ));
             }
             for _ in 0..span / prev.len() {
                 out.extend_from_slice(&prev);
@@ -213,17 +229,17 @@ fn parse_hexdump(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
             continue;
         }
         let (offset, idx) = offset_prefix(line)
-            .ok_or_else(|| bad(start, "line does not start with a hex offset"))?;
+            .ok_or_else(|| bad(line_start, "line does not start with a hex offset"))?;
         if offset != expected {
             return Err(bad(
-                start,
+                line_start,
                 format!("offset 0x{offset:x} does not follow 0x{expected:x}"),
             ));
         }
         if let Some(bar) = line.find('|') {
             // Data line: hex bytes live between the offset and the `|` column.
             let before = out.len();
-            parse_hex_region(&line[idx..bar], start + idx, &mut out)?;
+            parse_hex_region(&line[idx..bar], line_start + idx, &mut out)?;
             let added = out.len() - before;
             expected += added;
             if added > 0 {
@@ -232,7 +248,7 @@ fn parse_hexdump(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
         } else {
             // A line with only the end offset terminates the dump.
             if !line[idx..].trim().is_empty() {
-                return Err(bad(start, "expected a hex byte or an end offset"));
+                return Err(bad(line_start, "expected a hex byte or an end offset"));
             }
             break;
         }
@@ -241,6 +257,7 @@ fn parse_hexdump(lines: &[(usize, &str)]) -> Result<Dump, Diag> {
     Ok(Dump {
         bytes: out,
         style: "hexdump",
+        start,
     })
 }
 
@@ -266,6 +283,15 @@ mod tests {
 
     fn none(s: &str) {
         assert!(decode_dump(s).is_none(), "should not be a dump: {s:?}");
+    }
+
+    /// Structurally dump-shaped text that must not decode to bytes (so the
+    /// detector stays on plain text).
+    fn not_a_dump(s: &str) {
+        assert!(
+            !matches!(decode_dump(s), Some(Ok(_))),
+            "should not be a valid dump: {s:?}"
+        );
     }
 
     // ------------------------------------------------------------ xxd
@@ -344,6 +370,33 @@ mod tests {
         assert_eq!(e.offset, Some(s.find('g').unwrap()));
     }
 
+    #[test]
+    fn xxd_nonzero_start() {
+        // `xxd -s 0x40` output: the offset column starts at 64, not 0.
+        let s = "00000040: 0a03 666f 6f12  ....foo.\n";
+        let d = dump(s);
+        assert_eq!(d.style, "xxd");
+        assert_eq!(d.start, 0x40);
+        assert_eq!(d.bytes, [0x0a, 0x03, 0x66, 0x6f, 0x6f, 0x12]);
+    }
+
+    #[test]
+    fn xxd_nonzero_start_contiguous() {
+        let s = "00000040: 2e2e 2e2e 666f 6f2e 2e2e 6261 722e 2e2e  ....foo...bar...\n00000050: 2121 2121                                !!!!\n";
+        let d = dump(s);
+        assert_eq!(d.start, 0x40);
+        assert_eq!(d.bytes, b"....foo...bar...!!!!");
+    }
+
+    #[test]
+    fn xxd_nonzero_start_must_be_contiguous() {
+        // The first line starts at 0x40 but the second jumps to 0x60.
+        let s = "00000040: 2e2e 2e2e 666f 6f2e 2e2e 6261 722e 2e2e  ....foo...bar...\n00000060: 2121 2121                                !!!!\n";
+        let e = err(s);
+        assert_eq!(e.code, "BAD_DUMP");
+        assert_eq!(e.offset, Some(s.find("00000060").unwrap()));
+    }
+
     // ------------------------------------------------------------ hexdump
 
     #[test]
@@ -376,6 +429,18 @@ mod tests {
         let d = dump(s);
         assert_eq!(d.style, "hexdump");
         assert_eq!(d.bytes, b"....foo...bar...!");
+    }
+
+    #[test]
+    fn hexdump_c_nonzero_start() {
+        // `hexdump -C -s 64`: offsets start at 0x40, end offset is start+len.
+        let s = "00000040  0a 03 66 6f 6f 12 05 68  65 6c 6c 6f 18 96 01  |..foo..hello...|\n0000004f\n";
+        let d = dump(s);
+        assert_eq!(d.style, "hexdump");
+        assert_eq!(d.start, 0x40);
+        assert_eq!(d.bytes.len(), 15);
+        assert_eq!(d.bytes[0], 0x0a);
+        assert_eq!(d.bytes[14], 0x01);
     }
 
     #[test]
@@ -450,5 +515,14 @@ mod tests {
         none("00000000"); // offset column but no data byte
         none("00000000:");
         none("00000000\n");
+    }
+
+    #[test]
+    fn nonzero_leading_number_text_is_not_a_dump() {
+        // Accepting nonzero starts must not turn prose into a dump.
+        not_a_dump("1234: foo");
+        not_a_dump("1234: this is not a hex dump\n");
+        not_a_dump("1234: hello world");
+        not_a_dump("The 1234: line is prose, not a dump.");
     }
 }

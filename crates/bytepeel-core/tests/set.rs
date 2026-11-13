@@ -55,6 +55,30 @@ fn varint_in_hex_keeps_the_hex_style() {
 }
 
 #[test]
+fn dump_keeps_nonzero_start_offsets() {
+    // A dump from `xxd -s 0x40`: editing a protobuf field must keep the
+    // shifted offset column, and an unchanged value must round-trip exactly.
+    let input = "00000040: 0a03 666f 6f12 0568 656c 6c6f 1896 01    ..foo..hello...\n";
+    assert_eq!(set_s(input, "1", "\"foo\""), input);
+    let out = set_s(input, "1", "\"hi\"");
+    assert!(out.starts_with("00000040: "), "{out}");
+    assert!(out.contains("6869"), "{out}");
+    let n = peel(out.as_bytes(), &Options::default()).unwrap();
+    assert_eq!(
+        n.codec,
+        Codec::Dump {
+            style: "xxd",
+            start: 64
+        }
+    );
+    match &field(&n, "1").value {
+        FieldValue::Len { data, .. } => assert_eq!(data, b"hi"),
+        v => panic!("{v:?}"),
+    }
+    assert!(to_json(&n).contains("\"start\":64"));
+}
+
+#[test]
 fn setting_the_current_value_is_the_identity() {
     // Nothing but the field's own bytes may change.
     for input in [

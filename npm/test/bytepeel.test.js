@@ -35,6 +35,10 @@ test("get and getRaw dispatch by codec", () => {
   const cn = bp.get(cert, "0.0.5.2.0.1");
   assert.equal(cn.value, "ISRG Root X2");
   assert.equal(bp.get("a1 61 61 82 01 02", "a.1").value, "2");
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhXG5iIiwiZXhwIjoxfQ._wA";
+  assert.equal(bp.get(jwt, "payload.sub").value, "a\nb");
+  assert.equal(bp.get(jwt, "header").part, "header");
+  assert.equal(new TextDecoder().decode(bp.getRaw(jwt, "payload.sub")), "a\nb");
 });
 
 test("errors carry stable codes", () => {

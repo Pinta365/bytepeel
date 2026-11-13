@@ -350,3 +350,152 @@ fn parse_indices(p: &str) -> Result<Vec<usize>, Diag> {
         })
         .collect()
 }
+
+/// A JWT part picked by [`select_jwt`], optionally narrowed to one JSON value
+/// inside the header or payload.
+#[derive(Debug)]
+pub struct JwtPick<'a> {
+    /// `header`, `payload`, `signature` (JWS) or `header`, `encrypted_key`,
+    /// `iv`, `ciphertext`, `tag` (JWE).
+    pub part: &'static str,
+    /// The part's position in the token.
+    pub index: usize,
+    /// The part's base64url layer node.
+    pub node: &'a Node,
+    /// The JSON path within the part (empty when the whole part is picked).
+    pub path: String,
+    /// The selected value's byte range in the part's decoded text, and that
+    /// text (validated JSON), when `path` is non-empty.
+    pub json: Option<([usize; 2], &'a str)>,
+}
+
+const JWS_PARTS: [&str; 3] = ["header", "payload", "signature"];
+const JWE_PARTS: [&str; 5] = ["header", "encrypted_key", "iv", "ciphertext", "tag"];
+
+/// True when `node` (after any text layers) is a JWT.
+pub fn is_jwt(node: &Node) -> bool {
+    jwt_parts(node).is_some()
+}
+
+fn jwt_parts(node: &Node) -> Option<(&'static [&'static str], &[Node])> {
+    match &node.detail {
+        Detail::Parts { parts, .. } => match node.codec {
+            Codec::Jwt { kind: "jws" } => Some((&JWS_PARTS[..], parts)),
+            Codec::Jwt { .. } => Some((&JWE_PARTS[..], parts)),
+            _ => None,
+        },
+        Detail::Layer { child, .. } => jwt_parts(child),
+        _ => None,
+    }
+}
+
+/// Select a JWT part by name (`payload`) or index (`1`), then optionally a
+/// value inside its JSON (`payload.sub`, `header.alg`, `payload.roles.0`).
+/// JSON segments are object keys (matched exactly; the first of duplicate
+/// keys wins) or array indices. Keys containing `.` cannot be addressed.
+pub fn select_jwt<'a>(root: &'a Node, path: &str) -> Result<JwtPick<'a>, Diag> {
+    if path.trim().is_empty() {
+        return Err(Diag::new("BAD_PATH", "empty path", None));
+    }
+    let (names, parts) = jwt_parts(root).ok_or_else(|| {
+        Diag::new(
+            "PATH_NOT_MESSAGE",
+            "the input did not decode to a JWT",
+            None,
+        )
+    })?;
+    let segs: Vec<&str> = path.split('.').collect();
+    if segs.iter().any(|s| s.is_empty()) {
+        return Err(Diag::new(
+            "BAD_PATH",
+            "JWT paths do not allow empty segments",
+            None,
+        ));
+    }
+    let index = names
+        .iter()
+        .position(|n| *n == segs[0])
+        .or_else(|| segs[0].parse().ok().filter(|&i: &usize| i < names.len()))
+        .ok_or_else(|| {
+            Diag::new(
+                "PATH_NOT_FOUND",
+                format!(
+                    "no JWT part '{}' (expected one of {} or an index)",
+                    segs[0],
+                    names.join(", ")
+                ),
+                None,
+            )
+        })?;
+    let part = names[index];
+    let node = &parts[index];
+    let mut pick = JwtPick {
+        part,
+        index,
+        node,
+        path: segs[1..].join("."),
+        json: None,
+    };
+    if segs.len() > 1 {
+        let decoded = match &node.detail {
+            Detail::Layer { decoded, .. } => decoded,
+            _ => unreachable!("JWT parts are base64 layers"),
+        };
+        let text = std::str::from_utf8(decoded).map_err(|_| {
+            Diag::new(
+                "PATH_NOT_MESSAGE",
+                format!("JWT part '{part}' is not JSON text"),
+                None,
+            )
+        })?;
+        let range = crate::jsonpath::find(text, &segs[1..], part)?;
+        pick.json = Some((range, &text[range[0]..range[1]]));
+    }
+    Ok(pick)
+}
+
+impl JwtPick<'_> {
+    /// Serialize as `{"part":..,"index":..,"node":Node}` for a whole part, or
+    /// `{"part":..,"index":..,"path":..,"range":[s,e],"value":<JSON>}`.
+    pub fn to_json(&self) -> String {
+        let mut o = format!("{{\"part\":\"{}\",\"index\":{}", self.part, self.index);
+        match self.json {
+            None => {
+                o.push_str(",\"node\":");
+                o.push_str(&crate::json::node_to_json(self.node));
+            }
+            Some((range, text)) => {
+                o.push_str(",\"path\":");
+                crate::json::esc(&mut o, &self.path);
+                o.push_str(&format!(
+                    ",\"range\":[{},{}],\"value\":",
+                    range[0], range[1]
+                ));
+                o.push_str(text);
+            }
+        }
+        o.push('}');
+        o
+    }
+
+    /// Render as an outline: the part's node tree, or `payload.sub = "…"`.
+    pub fn to_tree(&self) -> String {
+        match self.json {
+            None => crate::tree::node_to_tree(self.node),
+            Some((_, text)) => format!("{}.{} = {}\n", self.part, self.path, text),
+        }
+    }
+
+    /// The selection's bytes for `--format raw`: a JSON string's unescaped
+    /// text, any other JSON value verbatim, or a whole part's decoded bytes.
+    pub fn payload(&self) -> Vec<u8> {
+        match self.json {
+            Some((_, text)) => crate::jsonpath::string_value(text)
+                .map_or_else(|| text.as_bytes().to_vec(), String::into_bytes),
+            None => match &self.node.detail {
+                Detail::Layer { decoded, .. } => decoded.clone(),
+                _ => Vec::new(),
+            },
+        }
+    }
+}

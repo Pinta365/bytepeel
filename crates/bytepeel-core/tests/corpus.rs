@@ -829,7 +829,7 @@ const HEXDUMP: &str =
 fn xxd_and_hexdump_input() {
     for (input, style) in [(XXD, "xxd"), (HEXDUMP, "hexdump")] {
         let n = auto(input.as_bytes());
-        assert_eq!(n.codec, Codec::Dump { style }, "{style}");
+        assert_eq!(n.codec, Codec::Dump { style, start: 0 }, "{style}");
         assert_eq!(varint_value(select(&n, "3").unwrap()), 150);
     }
 }
@@ -839,13 +839,57 @@ fn dump_ascii_column_is_ignored() {
     // The ASCII column of 0xca 0xfe 0xba 0xbe would never be hex, but a
     // column made of hex-looking text must not be read as data either.
     let n = auto(b"00000000: 6361 6665  cafe\n");
-    assert_eq!(n.codec, Codec::Dump { style: "xxd" });
+    assert_eq!(
+        n.codec,
+        Codec::Dump {
+            style: "xxd",
+            start: 0
+        }
+    );
     assert_eq!(
         child(&n).detail,
         Detail::Text {
             text: "cafe".into()
         }
     );
+}
+
+// A dump produced by `xxd -s 0x40` / `hexdump -C -s 64`: same bytes as above,
+// but every offset is shifted by 64.
+const XXD_OFFSET: &str = "00000040: 0a03 666f 6f12 0568 656c 6c6f 1896 01    ..foo..hello...\n";
+const HEXDUMP_OFFSET: &str =
+    "00000040  0a 03 66 6f 6f 12 05 68  65 6c 6c 6f 18 96 01     |..foo..hello...|\n0000004f\n";
+
+#[test]
+fn dump_nonzero_start_input() {
+    for (input, style) in [(XXD_OFFSET, "xxd"), (HEXDUMP_OFFSET, "hexdump")] {
+        let n = auto(input.as_bytes());
+        assert_eq!(n.codec, Codec::Dump { style, start: 64 }, "{style}");
+        assert_eq!(varint_value(select(&n, "3").unwrap()), 150);
+        // Child byte ranges stay relative to the decoded bytes (0-based).
+        assert_eq!(child(&n).range, [0, 15], "{style}");
+        let j = to_json(&n);
+        assert!(j.contains("\"start\":64"), "{style}: {j}");
+        let t = to_tree(&n);
+        assert!(t.contains("start=64"), "{style}: {t}");
+    }
+}
+
+#[test]
+fn zero_start_dump_has_no_start_field() {
+    // Existing (offset-0) output is unchanged: no `"start"` key at all.
+    assert!(!to_json(&auto(XXD.as_bytes())).contains("\"start\""));
+}
+
+#[test]
+fn nonzero_leading_numbers_are_not_dumps() {
+    // A nonzero leading number must not turn prose into a dump.
+    assert_eq!(auto(b"1234: foo").codec, Codec::Utf8);
+    assert_ne!(auto(b"1234: this is not a hex dump\n").codec.name(), "dump");
+    // Numbered lines of hex are contiguous "offsets"; a nonzero start needs
+    // an 8-digit offset column, so this stays text.
+    assert_ne!(auto(b"1: ab\n2: cd\n3: ef\n").codec.name(), "dump");
+    assert_ne!(auto(b"0040  ab cd  |..|\n0042\n").codec.name(), "dump");
 }
 
 #[test]
@@ -1604,6 +1648,166 @@ fn msgpack_select_value() {
 
 // ------------------------------------------------------------ JSON
 
+// ------------------------------------------------------------ packed fixed
+
+/// Field 1: packed doubles [51.5074, -0.1278]; field 2: packed floats
+/// [1.5, 2.25, -3]; field 3: packed varints [1, 2, 3, 150, 127, 5, 6].
+fn packed_fixed_msg() -> Vec<u8> {
+    let mut m = vec![0x0a, 16];
+    for d in [51.5074f64, -0.1278] {
+        m.extend_from_slice(&d.to_le_bytes());
+    }
+    m.extend_from_slice(&[0x12, 12]);
+    for f in [1.5f32, 2.25, -3.0] {
+        m.extend_from_slice(&f.to_le_bytes());
+    }
+    m.extend_from_slice(&h("1a08 01020396017f0506"));
+    m
+}
+
+#[test]
+fn packed_fixed_width_alts() {
+    let n = forced_pb(&packed_fixed_msg()).unwrap();
+    let f = msg(&n);
+    match &top_alt(&f[0]).kind {
+        AltKind::PackedFixed64(v) => {
+            assert_eq!(f64::from_bits(v[0]), 51.5074);
+            assert_eq!(f64::from_bits(v[1]), -0.1278);
+        }
+        k => panic!("field 1: {}", k.name()),
+    }
+    match &top_alt(&f[1]).kind {
+        AltKind::PackedFixed32(v) => {
+            let fs: Vec<f32> = v.iter().map(|&x| f32::from_bits(x)).collect();
+            assert_eq!(fs, [1.5, 2.25, -3.0]);
+        }
+        k => panic!("field 2: {}", k.name()),
+    }
+    // Small varints read as floats are denormal: packed_varint still wins.
+    assert_eq!(top_alt(&f[2]).kind.name(), "packed_varint");
+    let j = field_to_json(&f[1]);
+    assert!(j.contains(r#""as":"packed_fixed32""#), "{j}");
+    assert!(
+        j.contains(r#""values":[1069547520,1074790400,3225419776],"floats":[1.5,2.25,-3]"#),
+        "{j}"
+    );
+    let j = field_to_json(&f[0]);
+    assert!(
+        j.contains(
+            r#""values":["4632445839417212613","13817144537404334827"],"doubles":[51.5074,-0.1278]"#
+        ),
+        "{j}"
+    );
+}
+
+#[test]
+fn printable_payload_keeps_fixed_alts_low() {
+    // 8 printable bytes: a fixed64 reading is listed but never preferred.
+    let n = forced_pb(b"\x0a\x08abcdefgh").unwrap();
+    assert_eq!(top_alt(&msg(&n)[0]).kind.name(), "string");
+}
+
+// ------------------------------------------------------------ JWT --get
+
+fn jwt_get_token() -> String {
+    jws(
+        r#"{"alg":"HS256","typ":"JWT"}"#,
+        r#"{"sub":"1234","name":"Jö \"x\"","roles":["admin","dev"],"n":{"a":[1,2.5]},"sub":"dup"}"#,
+        b"\x01\x02sig",
+    )
+}
+
+#[test]
+fn jwt_get_parts_and_claims() {
+    let token = jwt_get_token();
+    let n = auto(token.as_bytes());
+    assert!(is_jwt(&n));
+    assert!(!is_der(&n) && !is_values(&n));
+
+    let p = select_jwt(&n, "payload").unwrap();
+    assert_eq!((p.part, p.index, p.json), ("payload", 1, None));
+    assert_eq!(select_jwt(&n, "1").unwrap().part, "payload");
+    let sig = select_jwt(&n, "signature").unwrap();
+    assert_eq!(sig.payload(), b"\x01\x02sig");
+
+    let sub = select_jwt(&n, "payload.sub").unwrap();
+    assert_eq!(sub.json.unwrap().1, r#""1234""#, "first duplicate key wins");
+    assert_eq!(sub.payload(), b"1234");
+    let name = select_jwt(&n, "payload.name").unwrap();
+    assert_eq!(String::from_utf8(name.payload()).unwrap(), "Jö \"x\"");
+    assert_eq!(select_jwt(&n, "payload.roles.1").unwrap().payload(), b"dev");
+    assert_eq!(select_jwt(&n, "payload.n.a.1").unwrap().payload(), b"2.5");
+    assert_eq!(
+        select_jwt(&n, "payload.n").unwrap().payload(),
+        br#"{"a":[1,2.5]}"#
+    );
+    assert_eq!(select_jwt(&n, "header.alg").unwrap().payload(), b"HS256");
+    let j = select_jwt(&n, "payload.sub").unwrap().to_json();
+    assert_eq!(
+        j,
+        r#"{"part":"payload","index":1,"path":"sub","range":[7,13],"value":"1234"}"#
+    );
+    assert_eq!(
+        select_jwt(&n, "header.alg").unwrap().to_tree(),
+        "header.alg = \"HS256\"\n"
+    );
+
+    let code = |p: &str| select_jwt(&n, p).unwrap_err().code;
+    assert_eq!(code("bogus"), "PATH_NOT_FOUND");
+    assert_eq!(code("3"), "PATH_NOT_FOUND");
+    assert_eq!(code("payload.nope"), "PATH_NOT_FOUND");
+    assert_eq!(code("payload.roles.7"), "PATH_NOT_FOUND");
+    assert_eq!(code("payload.sub.x"), "PATH_NOT_MESSAGE");
+    assert_eq!(code("signature.x"), "PATH_NOT_MESSAGE");
+    assert_eq!(code("payload..sub"), "BAD_PATH");
+    assert_eq!(code(""), "BAD_PATH");
+}
+
+#[test]
+fn jwe_part_names() {
+    let n = auto(jwe_token().as_bytes());
+    let names: Vec<&str> = (0..5)
+        .map(|i| select_jwt(&n, &i.to_string()).unwrap().part)
+        .collect();
+    assert_eq!(
+        names,
+        ["header", "encrypted_key", "iv", "ciphertext", "tag"]
+    );
+    assert_eq!(select_jwt(&n, "iv").unwrap().index, 2);
+    assert_eq!(
+        select_jwt(&n, "payload").unwrap_err().code,
+        "PATH_NOT_FOUND"
+    );
+}
+
+#[test]
+fn jwt_get_rejects_invalid_json() {
+    // A payload that only looks like JSON never yields a value.
+    let token = jws(r#"{"alg":"none"}"#, r#"{"a":01}"#, b"");
+    let n = auto(token.as_bytes());
+    assert_eq!(
+        select_jwt(&n, "payload.a").unwrap_err().code,
+        "PATH_NOT_MESSAGE"
+    );
+}
+
+// ------------------------------------------------------------ nested warnings
+
+#[cfg(feature = "deflate")]
+#[test]
+fn corrupt_stream_in_byte_string_keeps_its_warning() {
+    // A CBOR byte string holding a gzip stream with a broken CRC: the bytes
+    // leaf is kept as `decoded` so the CHECKSUM_MISMATCH warning is visible.
+    let mut gz = include_bytes!("fixtures/msg.bin.gz").to_vec();
+    let at = gz.len() - 8;
+    gz[at] ^= 0xff;
+    let mut cbor = vec![0x81, 0x58, gz.len() as u8];
+    cbor.extend_from_slice(&gz);
+    let n = auto(&cbor);
+    let j = to_json(&n);
+    assert!(j.contains(r#""code":"CHECKSUM_MISMATCH""#), "{j}");
+}
+
 #[test]
 fn json_is_valid_and_deterministic() {
     let inputs: Vec<Vec<u8>> = vec![
@@ -1632,6 +1836,8 @@ fn json_is_valid_and_deterministic() {
         include_bytes!("fixtures/json.zst").to_vec(),
         include_bytes!("fixtures/text.zlib").to_vec(),
         HEXDUMP.as_bytes().to_vec(),
+        XXD_OFFSET.as_bytes().to_vec(),
+        HEXDUMP_OFFSET.as_bytes().to_vec(),
         h("3012 0c03e282ac 1e04d83dde00 170d3236313131323039333030305a"),
         h("deadbeef"),
         b"SGVsbG8gd29ybGQ=".to_vec(),
@@ -1659,6 +1865,7 @@ fn json_is_valid_and_deterministic() {
         h("c249010000000000000000"),
         h("820100"),
         h("f98000"),
+        packed_fixed_msg(),
         Vec::new(),
     ];
     for input in inputs {
@@ -1670,6 +1877,18 @@ fn json_is_valid_and_deterministic() {
     }
     let e = diag_to_json(&Diag::new("X", "a \"quoted\"\nmessage", Some(3)));
     json_check::validate(&e).unwrap();
+    let token = jwt_get_token();
+    let n = auto(token.as_bytes());
+    for path in [
+        "payload",
+        "signature",
+        "payload.name",
+        "payload.n",
+        "header.alg",
+    ] {
+        let j = select_jwt(&n, path).unwrap().to_json();
+        json_check::validate(&j).unwrap_or_else(|e| panic!("{e}\n{j}"));
+    }
 }
 
 /// Minimal strict JSON validator (keeps the core crate's dev-deps at zero).

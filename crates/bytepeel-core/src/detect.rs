@@ -33,6 +33,7 @@ struct Cand {
 }
 
 pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
+    let _budget = compress::BudgetScope::new();
     match opts.input {
         InputForm::Auto => {
             if opts.depth > 0 {
@@ -58,7 +59,13 @@ pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
             let (codec, bytes) = match dump::decode_dump(t) {
                 Some(d) => {
                     let d = d?;
-                    (Codec::Dump { style: d.style }, d.bytes)
+                    (
+                        Codec::Dump {
+                            style: d.style,
+                            start: d.start,
+                        },
+                        d.bytes,
+                    )
                 }
                 None => (Codec::Hex, text::decode_hex(t)?),
             };
@@ -207,6 +214,9 @@ pub(crate) fn nested_bytes(buf: &[u8], depth: usize, opts: &Options) -> Option<N
     }
     let n = detect(buf, depth, opts, Mode::Nested);
     match n.codec {
+        // A bytes leaf with a warning (a corrupt or over-budget compressed
+        // stream, an unsupported format) is kept so the warning is reported.
+        Codec::Bytes if !n.warnings.is_empty() => Some(n),
         Codec::Utf8 | Codec::Bytes => None,
         _ => Some(n),
     }
@@ -302,7 +312,10 @@ fn best_layer(t: &str, nested: bool, depth: usize, opts: &Options) -> Option<Pic
             &mut best,
             0.98,
             Picked::Layer(Cand {
-                codec: Codec::Dump { style: d.style },
+                codec: Codec::Dump {
+                    style: d.style,
+                    start: d.start,
+                },
                 decoded: d.bytes,
                 conf: 0.98,
                 warnings: vec![],

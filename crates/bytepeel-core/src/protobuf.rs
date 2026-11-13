@@ -310,6 +310,28 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             score: if pr < 0.5 { 0.25 } else { 0.03 },
         });
     }
+    if data.len() % 8 == 0 {
+        let values: Vec<u64> = data
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let p = plausible_floats(values.iter().map(|&v| f64::from_bits(v)));
+        alts.push(Alt {
+            kind: AltKind::PackedFixed64(values),
+            score: fixed_score(0.3, p, pr),
+        });
+    }
+    if data.len() % 4 == 0 {
+        let values: Vec<u32> = data
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let p = plausible_floats(values.iter().map(|&v| f64::from(f32::from_bits(v))));
+        alts.push(Alt {
+            kind: AltKind::PackedFixed32(values),
+            score: fixed_score(0.28, p, pr),
+        });
+    }
     alts.push(Alt {
         kind: AltKind::Bytes,
         score: 0.02,
@@ -322,6 +344,30 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
     alts.sort_by(|a, b| b.score.total_cmp(&a.score));
     alts.truncate(opts.alts.max(1));
     alts
+}
+
+/// The fraction of `xs` that look like real measurements: zero, or finite
+/// with a magnitude in `[1e-9, 1e12]`. Integers, text and random bytes read as
+/// floats are mostly denormal, huge or NaN.
+fn plausible_floats(xs: impl Iterator<Item = f64>) -> f64 {
+    let (mut good, mut n) = (0usize, 0usize);
+    for x in xs {
+        n += 1;
+        if x == 0.0 || (x.is_finite() && (1e-9..=1e12).contains(&x.abs())) {
+            good += 1;
+        }
+    }
+    if n == 0 { 0.0 } else { good as f64 / n as f64 }
+}
+
+/// Score of a packed fixed-width reading: `top` × plausibility⁴ when the
+/// payload is mostly non-printable, plus a floor so the reading is still listed.
+fn fixed_score(top: f64, plausible: f64, printable: f64) -> f64 {
+    if printable < 0.5 {
+        top * plausible.powi(4) + 0.01
+    } else {
+        0.01
+    }
 }
 
 fn packed_varints(data: &[u8]) -> Option<Vec<u64>> {

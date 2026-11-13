@@ -6,8 +6,56 @@
 use crate::Diag;
 
 #[cfg(any(feature = "deflate", feature = "zstd"))]
-/// Decompressed output cap: guards against decompression bombs.
+/// Decompressed output cap per stream: guards against decompression bombs.
 pub(crate) const MAX_OUTPUT: usize = 64 << 20;
+
+/// Total decompressed output allowed per [`crate::peel`] call, across every
+/// compressed layer it finds (many small bombs nested in one input).
+#[cfg(any(feature = "deflate", feature = "zstd"))]
+pub(crate) const TOTAL_BUDGET: usize = 256 << 20;
+
+#[cfg(any(feature = "deflate", feature = "zstd"))]
+thread_local! {
+    /// Bytes the current peel may still decompress; `usize::MAX` outside one.
+    static REMAINING: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Gives the current thread a fresh [`TOTAL_BUDGET`] until dropped, then
+/// restores the previous one (so a peel nested in another is safe).
+pub(crate) struct BudgetScope {
+    #[cfg(any(feature = "deflate", feature = "zstd"))]
+    prev: usize,
+}
+
+impl BudgetScope {
+    pub(crate) fn new() -> Self {
+        #[cfg(any(feature = "deflate", feature = "zstd"))]
+        return Self::with(TOTAL_BUDGET);
+        #[cfg(not(any(feature = "deflate", feature = "zstd")))]
+        BudgetScope {}
+    }
+
+    #[cfg(any(feature = "deflate", feature = "zstd"))]
+    fn with(budget: usize) -> Self {
+        BudgetScope {
+            prev: REMAINING.replace(budget),
+        }
+    }
+}
+
+impl Drop for BudgetScope {
+    fn drop(&mut self) {
+        #[cfg(any(feature = "deflate", feature = "zstd"))]
+        REMAINING.set(self.prev);
+    }
+}
+
+/// The output cap for the next stream: the per-stream cap or what is left of
+/// the budget, whichever is smaller.
+#[cfg(any(feature = "deflate", feature = "zstd"))]
+fn cap() -> usize {
+    MAX_OUTPUT.min(REMAINING.get())
+}
 
 pub(crate) struct Inflated {
     /// `gzip`, `zlib` or `zstd`.
@@ -39,7 +87,16 @@ pub(crate) fn decompress(buf: &[u8]) -> Option<Outcome> {
         },
     };
     Some(match res {
-        Ok(i) => Outcome::Decoded(i),
+        Ok(i) => {
+            #[cfg(any(feature = "deflate", feature = "zstd"))]
+            REMAINING.with(|r| {
+                // `usize::MAX` means no peel is running: nothing to charge.
+                if r.get() != usize::MAX {
+                    r.set(r.get().saturating_sub(i.bytes.len()));
+                }
+            });
+            Outcome::Decoded(i)
+        }
         Err(d) => Outcome::Failed(d),
     })
 }
@@ -76,11 +133,15 @@ fn corrupt(kind: &str, msg: impl std::fmt::Display, off: Option<usize>) -> Diag 
 
 #[cfg(any(feature = "deflate", feature = "zstd"))]
 fn too_large(kind: &str) -> Diag {
-    Diag::new(
-        "OUTPUT_TOO_LARGE",
-        format!("{kind}: decompressed size exceeds {} MiB", MAX_OUTPUT >> 20),
-        Some(0),
-    )
+    let message = if REMAINING.get() < MAX_OUTPUT {
+        format!(
+            "{kind}: the {} MiB total decompression budget for this input is exhausted",
+            TOTAL_BUDGET >> 20
+        )
+    } else {
+        format!("{kind}: decompressed size exceeds {} MiB", MAX_OUTPUT >> 20)
+    };
+    Diag::new("OUTPUT_TOO_LARGE", message, Some(0))
 }
 
 #[cfg(any(feature = "deflate", feature = "zstd"))]
@@ -223,12 +284,11 @@ fn inflate(
         flags |= f::TINFL_FLAG_PARSE_ZLIB_HEADER | f::TINFL_FLAG_COMPUTE_ADLER32;
     }
     let mut d = Box::<DecompressorOxide>::default();
+    // `cap` bounds the whole output, so concatenated gzip members share it.
+    let cap = cap().max(out.len());
     let start = out.len();
     let mut out_pos = start;
-    out.resize(
-        start + input.len().saturating_mul(3).clamp(64, MAX_OUTPUT),
-        0,
-    );
+    out.resize((start + input.len().saturating_mul(3).max(64)).min(cap), 0);
     let mut consumed = 0;
     loop {
         let (status, used, wrote) = decompress(&mut d, &input[consumed..], out, out_pos, flags);
@@ -240,11 +300,11 @@ fn inflate(
                 return Ok(consumed);
             }
             TINFLStatus::HasMoreOutput => {
-                if out.len() - start >= MAX_OUTPUT {
+                if out.len() >= cap {
                     return Err(too_large(kind));
                 }
-                let grow = (out.len() - start).min(MAX_OUTPUT - (out.len() - start));
-                out.resize(out.len() + grow.max(64), 0);
+                let grow = (out.len() - start).max(64).min(cap - out.len());
+                out.resize(out.len() + grow, 0);
             }
             TINFLStatus::Adler32Mismatch => {
                 return Err(Diag::new(
@@ -290,7 +350,7 @@ fn zstd(buf: &[u8]) -> Result<Inflated, Diag> {
     loop {
         let at = buf.len() - src.len();
         let mut dec = StreamingDecoder::new(&mut src).map_err(|e| corrupt("zstd", e, Some(at)))?;
-        let room = (MAX_OUTPUT - out.len()) as u64;
+        let room = cap().saturating_sub(out.len()) as u64;
         let n = (&mut dec)
             .take(room + 1)
             .read_to_end(&mut out)
@@ -478,6 +538,35 @@ fn crc32(data: &[u8]) -> u32 {
 #[cfg(all(test, feature = "deflate"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_budget_spans_streams_and_is_restored() {
+        let gz = include_bytes!("../tests/fixtures/msg.bin.gz");
+        let len = match decompress(gz) {
+            Some(Outcome::Decoded(i)) => i.bytes.len(),
+            _ => panic!("fixture did not decode"),
+        };
+        {
+            let _outer = BudgetScope::with(2 * len + len / 2);
+            for _ in 0..2 {
+                assert!(matches!(decompress(gz), Some(Outcome::Decoded(_))));
+            }
+            {
+                // A nested scope gets its own budget and restores the outer one.
+                let _inner = BudgetScope::with(len);
+                assert!(matches!(decompress(gz), Some(Outcome::Decoded(_))));
+            }
+            match decompress(gz) {
+                Some(Outcome::Failed(d)) => {
+                    assert_eq!(d.code, "OUTPUT_TOO_LARGE");
+                    assert!(d.message.contains("budget"), "{}", d.message);
+                }
+                _ => panic!("third stream should exceed the budget"),
+            }
+        }
+        // Outside any scope there is no total budget.
+        assert_eq!(REMAINING.get(), usize::MAX);
+    }
 
     #[test]
     fn crc32_check_value() {

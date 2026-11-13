@@ -152,7 +152,7 @@ fn value(o: &mut String, v: &Value) {
     o.push('}');
 }
 
-fn esc(o: &mut String, s: &str) {
+pub(crate) fn esc(o: &mut String, s: &str) {
     o.push('"');
     for c in s.chars() {
         match c {
@@ -262,8 +262,11 @@ fn node(o: &mut String, n: &Node) {
             o.push_str(",\"name\":");
             esc(o, name);
         }
-        Codec::Dump { style } => {
+        Codec::Dump { style, start } => {
             let _ = write!(o, ",\"style\":\"{style}\"");
+            if *start != 0 {
+                let _ = write!(o, ",\"start\":{start}");
+            }
         }
         Codec::Jwt { kind } => {
             let _ = write!(o, ",\"kind\":\"{kind}\"");
@@ -423,10 +426,41 @@ fn alt(o: &mut String, a: &Alt, data: &[u8]) {
                 o.push_str(",\"truncated\":true");
             }
         }
+        AltKind::PackedFixed32(values) => {
+            let shown = &values[..values.len().min(PACKED_CAP)];
+            o.push_str(",\"values\":[");
+            join(o, shown.iter().map(|v| v.to_string()));
+            o.push_str("],\"floats\":[");
+            join(o, shown.iter().map(|&v| fmt_f32(f32::from_bits(v))));
+            o.push(']');
+            if values.len() > PACKED_CAP {
+                o.push_str(",\"truncated\":true");
+            }
+        }
+        AltKind::PackedFixed64(values) => {
+            let shown = &values[..values.len().min(PACKED_CAP)];
+            o.push_str(",\"values\":[");
+            join(o, shown.iter().map(|v| format!("\"{v}\"")));
+            o.push_str("],\"doubles\":[");
+            join(o, shown.iter().map(|&v| fmt_f64(f64::from_bits(v))));
+            o.push(']');
+            if values.len() > PACKED_CAP {
+                o.push_str(",\"truncated\":true");
+            }
+        }
         AltKind::Bytes => hex_kv(o, data),
         AltKind::Empty => {}
     }
     o.push('}');
+}
+
+fn join(o: &mut String, items: impl Iterator<Item = String>) {
+    for (i, s) in items.enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        o.push_str(&s);
+    }
 }
 
 fn asn1_arr(o: &mut String, items: &[Asn1]) {

@@ -26,7 +26,8 @@ OPTIONS:
     --alts <N>                     Max interpretations kept per LEN field (default: 3)
     --get <PATH>                   Select one protobuf field (field numbers, e.g. 1.3[2].4),
                                    DER element (child indices, e.g. 0.0.6), or CBOR/MessagePack
-                                   value (map keys / array indices, e.g. users.0.name)
+                                   value (map keys / array indices, e.g. users.0.name), or JWT
+                                   part and JSON claim (e.g. payload, payload.sub, header.alg)
     --format <json|tree|raw>       Output format (default: json; raw needs --get)
     -h, --help                     Print help
     -V, --version                  Print version
@@ -324,6 +325,17 @@ fn main() -> ExitCode {
                         return fail(&e, 1);
                     }
                 },
+            }
+        }
+        Some(path) if core::is_jwt(&node) => {
+            let p = match core::select_jwt(&node, path) {
+                Ok(p) => p,
+                Err(e) => return fail(&e, 1),
+            };
+            match args.format {
+                Format::Json => writeln!(out, "{}", p.to_json()),
+                Format::Tree => write!(out, "{}", p.to_tree()),
+                Format::Raw => out.write_all(&p.payload()),
             }
         }
         Some(path) => {

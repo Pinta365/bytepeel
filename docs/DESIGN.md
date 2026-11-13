@@ -67,6 +67,9 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
   "alphabet": "std" | "url", "padded": bool,   // base64 only
   "label": "CERTIFICATE",                      // pem only
   "style": "xxd" | "hexdump",                  // dump only
+  "start": N,                                  // dump only, when the dump
+                                               // starts at a nonzero offset
+                                               // (child ranges stay 0-based)
   "kind": "jws" | "jwe",                       // jwt only
   "name": "msg.bin",                           // gzip only, when the header has FNAME
   "range": [start, end],                       // half-open, in the parent buffer
@@ -105,6 +108,8 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
 { "as": "message", "score": 0.67, "fields": [Field] }
 { "as": "string", "score": 0.95, "value": "...", "decoded": Node? }  // decoded: string is itself hex/base64/PEM
 { "as": "packed_varint", "score": 0.31, "values": ["8", "150"] }
+{ "as": "packed_fixed32", "score": 0.94, "values": [1069547520], "floats": [1.5] }
+{ "as": "packed_fixed64", "score": 0.87, "values": ["4632445839417212613"], "doubles": [51.5074] }
 { "as": "bytes", "score": 0.02, "hex": "..." }
 { "as": "empty", "score": 1.0 }
 ```
@@ -163,7 +168,9 @@ buffer, and `"indefinite":true` when it used a CBOR indefinite-length form.
 
 A `bytes` value's `decoded` node starts a new buffer at those bytes and is set
 when they are themselves CBOR/MessagePack/DER/protobuf/compressed, or a text
-encoding (never for plain text or opaque bytes).
+encoding (never for plain text or opaque bytes). It is also set to a `bytes`
+leaf that carries a warning (a corrupt or over-budget compressed stream, an
+unsupported format), so the warning is not lost.
 
 MessagePack maps onto the same tree: positive and negative integers become
 `uint`/`nint` (negatives keep the `-1-n` form, so `int64` min is
@@ -268,6 +275,24 @@ A `range` points into the buffer the node or field was parsed from:
   matches an integer map key; CBOR tags are followed transparently and a
   multi-item sequence is indexed by the first segment. `--format raw` writes a
   `bytes` value's bytes, an `ext` value's data, or a `text` value's UTF-8.
+- JWT: a part name (`header`, `payload`, `signature`; for a JWE `header`,
+  `encrypted_key`, `iv`, `ciphertext`, `tag`) or its index, optionally
+  followed by object keys / array indices into that part's JSON
+  (`payload.sub`, `payload.roles.0`, `header.alg`). Keys match exactly after
+  unescaping; the first of duplicate keys wins; keys containing `.` can't be
+  addressed. The part must be strictly valid JSON (RFC 8259). Output:
+
+  ```jsonc
+  { "part": "payload", "index": 1, "node": Node }          // a whole part
+  { "part": "payload", "index": 1, "path": "sub",
+    "range": [7, 13],                                       // in the part's decoded text
+    "value": "1234" }                                       // the JSON value, verbatim
+  ```
+
+  `value` is copied from the token, so its numbers are not re-encoded (a large
+  integer stays a JSON number). `--format raw` writes a string's unescaped
+  text, any other value's JSON, or a whole part's decoded bytes; `--format
+  tree` prints `payload.sub = "1234"`.
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
@@ -417,7 +442,7 @@ with typed edit values (strings are text, numbers are numbers) and
 | Base64: ≥16 chars / has `+/-_` or `=` / unpadded | +0.1 / +0.1 / −0.05 |
 | Base64: non-zero unused trailing bits | ×0.3, plus `NONCANONICAL_BASE64` warning |
 | Base64: only hex chars / no digit and no symbol | ×0.5 / ×0.6 |
-| Dump (`xxd` / `hexdump -C`) | 0.98; needs an offset-0 first line with `:` (xxd) or two spaces and a `|` column (hexdump), contiguous offsets, ≥1 byte |
+| Dump (`xxd` / `hexdump -C`) | 0.98; needs a hex-offset first line (any start, e.g. `xxd -s` / `hexdump -s`) with `:` (xxd) or two spaces and a `|` column (hexdump), contiguous offsets, ≥1 byte; the non-zero start is reported as `"start"` |
 | JWT | 0.97; 3 (`jws`) or 5 (`jwe`) dot-separated unpadded base64url segments whose header is canonical base64url for printable UTF-8 JSON starting with `{` and containing `"alg"`; any segment may be empty |
 | PEM bundle | 0.99; 2+ `BEGIN`/`END` blocks, each label matching between `BEGIN` and `END` (one block stays a `pem` node); non-whitespace text outside all blocks → a single `TRAILING_DATA` warning carrying the ignored byte count; a *later* broken block stops the scan and becomes a warning on the node (`PEM_UNTERMINATED`, or the base64 error) with its offset, keeping the blocks before it |
 | Text layer threshold: top level / nested | > 0.5 / > 0.75 (nested also needs hex ≥8 chars, base64 ≥16 chars) |
@@ -429,10 +454,11 @@ with typed edit values (strings are text, numbers are numbers) and
 | CBOR / MessagePack / protobuf | when several accept the buffer, the highest confidence wins; on a tie prefer all-text map keys, then CBOR, then MessagePack, then protobuf. Every other interpretation is named with its confidence in one `AMBIGUOUS_FORMAT` warning. Map-less trees score 0.6 because many protobuf messages whose first tag is for field 16+ also parse as a CBOR/MessagePack array. Candidates are parsed structurally; nested detection (byte strings, protobuf string fields) runs once, on the winner |
 | gzip / zstd | magic `1f 8b 08` / `28 b5 2f fd`; decoded (confidence 1.0) only if the stream is complete and its CRC32 / content checksum matches, else a `bytes` leaf with the error as a warning |
 | zlib | a valid 2-byte header (CM 8, CINFO ≤ 7, FCHECK, no FDICT) whose stream inflates with a matching Adler-32. Failures are reported only for the common headers `78 01/5e/9c/da`; other headers fall through to DER/protobuf |
-| Decompressed size | capped at 64 MiB (`OUTPUT_TOO_LARGE`) |
+| Decompressed size | capped at 64 MiB per stream (concatenated gzip members and zstd frames share the cap) and 256 MiB in total per peel across every compressed layer (`OUTPUT_TOO_LARGE`) |
 | LEN alt: message | plausibility, ×0.3 if the payload is fully printable |
 | LEN alt: string | 0.9 × printable_ratio⁴ |
 | LEN alt: packed_varint | 0.25 if mostly non-printable, else 0.03 |
+| LEN alt: packed_fixed64 / packed_fixed32 | offered when the length is a multiple of 8 / 4: 0.3 / 0.28 × p⁴ + 0.01 if mostly non-printable (p = share of values that read as a plausible float: 0, or finite with magnitude in [1e-9, 1e12]), else 0.01. Two floats can also read as one plausible double, so both alts may appear |
 | LEN alt: bytes | always present at 0.02 |
 
 Alt scores are normalized to sum to 1, then truncated to `--alts`.
@@ -476,7 +502,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `AMBIGUOUS_FORMAT` | The buffer also parses as one or more other codecs; the message names each with its confidence |
 | Warning: `CORRUPT_DATA` | A gzip/zlib/zstd stream is truncated or invalid |
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
-| Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB |
+| Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB, or the 256 MiB total budget for the input is exhausted |
 | `BAD_VALUE` | A `set` value is not in the value syntax (exit 2) |
 | `TYPE_MISMATCH` | A `set` value does not fit the field's wire type |
 | `VALUE_OUT_OF_RANGE` | A `set` integer or float does not fit the field |
@@ -493,15 +519,14 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 - A protobuf message whose bytes are all printable (possible when every tag is
   for field 4 or higher and every length is ≥32) is reported as text. Use
   `--as protobuf`.
-- Packed fields are only tried as varints, not as fixed32/fixed64.
 - JWT time claims are read only from a JWS payload that is a JSON object;
   fractional seconds are truncated, exponent notation is ignored, and JWE
   tokens have no claims.
-- Hex dumps must start at offset 0; `od` and plain `hexdump` (non `-C`) are not parsed.
+- `od` and plain `hexdump` (non `-C`) are not parsed.
 - CBOR and MessagePack are auto-detected only when the top level is a map or
   array (CBOR also accepts a self-describe tag); a bare scalar needs
   `--as cbor` / `--as msgpack`. JSON floats print `-0.0` as `0`.
-- DER: only OIDs in a built-in table (~85) are named; BER indefinite
+- DER: only OIDs in a built-in table (~175) are named; BER indefinite
   lengths and constructed strings are not supported.
 - `--get` on DER can't descend into a protobuf string or vice versa.
 

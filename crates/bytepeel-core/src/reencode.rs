@@ -151,11 +151,25 @@ fn hex_style(orig: &str) -> HexStyle {
 
 /// Emit `xxd` (16 bytes/line, group size from the original, ASCII column) or
 /// `hexdump -C` (two 8-byte groups, `|ascii|`, `*` repeat compression and the
-/// final end-offset line).
-pub(crate) fn dump_like(orig: &str, style: &str, bytes: &[u8]) -> String {
+/// final end-offset line). `origin` is the offset of the first byte (nonzero
+/// for `xxd -s` / `hexdump -s`). Blank lines before and line breaks after the
+/// dump are kept.
+pub(crate) fn dump_like(orig: &str, style: &str, origin: usize, bytes: &[u8]) -> String {
     let nl = if orig.contains("\r\n") { "\r\n" } else { "\n" };
-    let final_nl = if orig.ends_with('\n') { nl } else { "" };
-    let mut out = String::new();
+    // Whole blank lines before the first offset, and the line breaks after the
+    // last line (a trailing space can belong to the ASCII column).
+    let lead_end = orig
+        .split_inclusive('\n')
+        .take_while(|l| l.trim().is_empty())
+        .map(str::len)
+        .sum::<usize>();
+    let trail_start = orig.trim_end_matches(['\r', '\n']).len().max(lead_end);
+    let (lead, body, final_nl) = (
+        &orig[..lead_end],
+        &orig[lead_end..trail_start],
+        &orig[trail_start..],
+    );
+    let mut out = String::from(lead);
 
     if style == "hexdump" {
         let chunks: Vec<&[u8]> = bytes.chunks(16).collect();
@@ -170,16 +184,16 @@ pub(crate) fn dump_like(orig: &str, style: &str, bytes: &[u8]) -> String {
                     star = true;
                 }
             } else {
-                out.push_str(&hexdump_line(i * 16, chunk));
+                out.push_str(&hexdump_line(origin + i * 16, chunk));
                 out.push_str(nl);
                 star = false;
                 prev_full = if full { Some(*chunk) } else { None };
             }
         }
-        let _ = write!(out, "{:08x}", bytes.len());
+        let _ = write!(out, "{:08x}", origin + bytes.len());
         out.push_str(final_nl);
     } else {
-        let g = xxd_group_size(orig);
+        let g = xxd_group_size(body);
         let mut start = 0;
         let mut first = true;
         while start < bytes.len() {
@@ -188,7 +202,7 @@ pub(crate) fn dump_like(orig: &str, style: &str, bytes: &[u8]) -> String {
                 out.push_str(nl);
             }
             first = false;
-            out.push_str(&xxd_line(start, &bytes[start..end], g));
+            out.push_str(&xxd_line(origin + start, &bytes[start..end], g));
             start = end;
         }
         out.push_str(final_nl);
@@ -452,7 +466,7 @@ mod tests {
         ] {
             let d = dump(o);
             assert_eq!(d.style, "xxd");
-            assert_eq!(dump_like(o, "xxd", &d.bytes), o, "xxd {o:?}");
+            assert_eq!(dump_like(o, "xxd", d.start, &d.bytes), o, "xxd {o:?}");
         }
     }
 
@@ -466,7 +480,11 @@ mod tests {
         ] {
             let d = dump(o);
             assert_eq!(d.style, "hexdump");
-            assert_eq!(dump_like(o, "hexdump", &d.bytes), o, "hexdump {o:?}");
+            assert_eq!(
+                dump_like(o, "hexdump", d.start, &d.bytes),
+                o,
+                "hexdump {o:?}"
+            );
         }
     }
 
@@ -474,11 +492,59 @@ mod tests {
     fn dump_changed_roundtrip() {
         let b: Vec<u8> = (0u8..40).collect();
         let xxd = "00000000: 6865 6c6c 6f0a                           hello.\n";
-        let out = dump_like(xxd, "xxd", &b);
+        let out = dump_like(xxd, "xxd", dump(xxd).start, &b);
         assert_eq!(dump(&out).bytes, b);
         let hd = "00000000  68 65 6c 6c 6f 0a                                 |hello.|\n00000006\n";
-        let out = dump_like(hd, "hexdump", &b);
+        let out = dump_like(hd, "hexdump", dump(hd).start, &b);
         assert_eq!(dump(&out).bytes, b);
+    }
+
+    #[test]
+    fn dump_keeps_blank_edges_and_start() {
+        let xxd = "\n\n00000040: 0896 01                                  ...\n\n";
+        let d = dump(xxd);
+        assert_eq!(dump_like(xxd, "xxd", d.start, &d.bytes), xxd);
+        let out = dump_like(xxd, "xxd", d.start, &[0x08, 0x05]);
+        assert_eq!(
+            out,
+            "\n\n00000040: 0805                                     ..\n\n"
+        );
+        let hd =
+            "\r\n00000040  08 96 01                                          |...|\r\n00000043\r\n";
+        let d = dump(hd);
+        assert_eq!(dump_like(hd, "hexdump", d.start, &d.bytes), hd);
+    }
+
+    #[test]
+    fn dump_nonzero_start_exact() {
+        let xxd = "00000040: 2e2e 2e2e 666f 6f2e 2e2e 6261 722e 2e2e  ....foo...bar...\n";
+        let d = dump(xxd);
+        assert_eq!(d.start, 0x40);
+        assert_eq!(dump_like(xxd, "xxd", d.start, &d.bytes), xxd);
+        let hd = "00000040  2e 2e 2e 2e 66 6f 6f 2e  2e 2e 62 61 72 2e 2e 2e  |....foo...bar...|\n00000050\n";
+        let d = dump(hd);
+        assert_eq!(d.start, 0x40);
+        assert_eq!(dump_like(hd, "hexdump", d.start, &d.bytes), hd);
+    }
+
+    #[test]
+    fn dump_nonzero_start_changed_keeps_offsets() {
+        let b: Vec<u8> = (0u8..40).collect();
+        let xxd = "00000040: 6865 6c6c 6f0a                           hello.\n";
+        let out = dump_like(xxd, "xxd", dump(xxd).start, &b);
+        assert!(out.starts_with("00000040: "), "{out}");
+        let d = dump(&out);
+        assert_eq!(d.start, 0x40);
+        assert_eq!(d.bytes, b);
+        let hd = "00000040  68 65 6c 6c 6f 0a                                 |hello.|\n00000046\n";
+        let out = dump_like(hd, "hexdump", dump(hd).start, &b);
+        assert!(out.starts_with("00000040  "), "{out}");
+        // The final end-offset line is start + len, not len.
+        let last = out.trim_end().lines().last().unwrap();
+        assert_eq!(last, format!("{:08x}", 0x40 + b.len()));
+        let d = dump(&out);
+        assert_eq!(d.start, 0x40);
+        assert_eq!(d.bytes, b);
     }
 
     #[test]

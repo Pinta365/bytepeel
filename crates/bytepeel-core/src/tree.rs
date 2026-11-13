@@ -160,8 +160,12 @@ fn node(o: &mut String, n: &Node, d: usize) {
         Codec::Gzip { name: Some(name) } => {
             let _ = write!(o, "({name:?})");
         }
-        Codec::Dump { style } => {
-            let _ = write!(o, "({style})");
+        Codec::Dump { style, start } => {
+            if *start == 0 {
+                let _ = write!(o, "({style})");
+            } else {
+                let _ = write!(o, "({style}, start={start})");
+            }
         }
         Codec::Jwt { kind } => {
             let _ = write!(o, "({kind})");

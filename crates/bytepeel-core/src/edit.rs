@@ -697,7 +697,9 @@ fn encode_layer(codec: &Codec, orig: &[u8], inner: &[u8]) -> Result<Vec<u8>, Dia
     };
     Ok(match codec {
         Codec::Hex => reencode::hex_like(text()?, inner).into_bytes(),
-        Codec::Dump { style } => reencode::dump_like(text()?, style, inner).into_bytes(),
+        Codec::Dump { style, start } => {
+            reencode::dump_like(text()?, style, *start, inner).into_bytes()
+        }
         Codec::Base64 { alphabet, padded } => {
             reencode::base64_like(text()?, *alphabet, *padded, inner).into_bytes()
         }

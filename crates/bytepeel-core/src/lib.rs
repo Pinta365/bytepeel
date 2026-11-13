@@ -25,6 +25,7 @@ mod edit;
 mod encode_value;
 mod error;
 mod json;
+mod jsonpath;
 mod jwt;
 mod msgpack;
 mod node;
@@ -41,7 +42,7 @@ pub use error::Diag;
 pub use node::{
     Alphabet, Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass,
 };
-pub use path::{is_der, is_values, select, select_der, select_value};
+pub use path::{JwtPick, is_der, is_jwt, is_values, select, select_der, select_jwt, select_value};
 pub use text::{B64, decode_b64, decode_hex};
 pub use value::{Value, ValueKind};
 

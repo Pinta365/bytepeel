@@ -184,3 +184,24 @@ fn set_add_and_delete() {
     assert_eq!(code, 2);
     assert!(err.contains("USAGE"), "{err}");
 }
+
+#[test]
+fn jwt_get_claims_and_parts() {
+    let token = b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhXG5iIiwiZXhwIjoxfQ._wA";
+    let (code, out, _) = run(&["--get", "payload.sub"], token);
+    assert_eq!(code, 0);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"part\":\"payload\",\"index\":1,\"path\":\"sub\",\"range\":[7,13],\"value\":\"a\\nb\"}\n"
+    );
+    // Raw: a JSON string is unescaped; a whole part is its decoded bytes.
+    let (_, out, _) = run(&["--get", "payload.sub", "--format", "raw"], token);
+    assert_eq!(out, b"a\nb");
+    let (_, out, _) = run(&["--get", "signature", "--format", "raw"], token);
+    assert_eq!(out, b"\xff\x00");
+    let (_, out, _) = run(&["--get", "header.alg", "--format", "tree"], token);
+    assert_eq!(out, b"header.alg = \"HS256\"\n");
+    let (code, _, err) = run(&["--get", "payload.nope"], token);
+    assert_eq!(code, 1);
+    assert!(err.contains("PATH_NOT_FOUND"), "{err}");
+}

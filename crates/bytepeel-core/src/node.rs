@@ -27,8 +27,11 @@ impl Alphabet {
 pub enum Codec {
     Hex,
     /// A hex dump with an offset column (`style` is `xxd` or `hexdump`).
+    /// `start` is the decimal offset the first line starts at (nonzero for
+    /// `xxd -s` / `hexdump -s`); child ranges stay 0-based.
     Dump {
         style: &'static str,
+        start: usize,
     },
     Base64 {
         alphabet: Alphabet,
@@ -187,6 +190,10 @@ pub enum AltKind {
         decoded: Option<Box<Node>>,
     },
     PackedVarint(Vec<u64>),
+    /// Little-endian 4-byte values (packed `fixed32` / `sfixed32` / `float`).
+    PackedFixed32(Vec<u32>),
+    /// Little-endian 8-byte values (packed `fixed64` / `sfixed64` / `double`).
+    PackedFixed64(Vec<u64>),
     Bytes,
     Empty,
 }
@@ -197,6 +204,8 @@ impl AltKind {
             AltKind::Message(_) => "message",
             AltKind::String { .. } => "string",
             AltKind::PackedVarint(_) => "packed_varint",
+            AltKind::PackedFixed32(_) => "packed_fixed32",
+            AltKind::PackedFixed64(_) => "packed_fixed64",
             AltKind::Bytes => "bytes",
             AltKind::Empty => "empty",
         }

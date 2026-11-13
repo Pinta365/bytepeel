@@ -55,6 +55,7 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
                                      DER: 0-based child indices, e.g. 0.0.6
                                      PEM bundle: first index picks the block, e.g. 1.0.0.5
                                      CBOR/MessagePack: map keys / array indices, e.g. users.0.name
+                                     JWT: part, then JSON keys, e.g. payload.sub, header.alg
 --format <json|tree|raw>             raw writes a --get selection's payload bytes
 ```
 
@@ -103,6 +104,9 @@ SEQUENCE [124..156]
 
 $ bytepeel record.cbor --get tags.1 --format raw     # a CBOR map value
 b
+
+$ echo "$TOKEN" | bytepeel --get payload.sub --format raw   # a JWT claim
+1234567890
 ```
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,
