@@ -299,48 +299,123 @@ pub(crate) fn noncanonical_diag() -> Diag {
 
 // ---------------------------------------------------------------- PEM
 
-pub(crate) struct Pem {
+/// One PEM block: its label, decoded body and `BEGIN..END` range.
+pub(crate) struct PemBlock {
     pub label: String,
     pub b64: B64,
-    /// Non-whitespace text exists outside the first PEM block.
-    pub trailing: bool,
+    /// Range of the whole block: the `BEGIN` line start to the `END` line end.
+    pub range: [usize; 2],
 }
 
-/// `None` if there is no PEM block; `Some(Err)` if there is a broken one.
-pub(crate) fn decode_pem(s: &str) -> Option<Result<Pem, Diag>> {
+/// Every PEM block in the text, plus the non-whitespace bytes outside them.
+pub(crate) struct PemBundle {
+    pub blocks: Vec<PemBlock>,
+    /// Bytes of non-whitespace text outside all blocks (up to any break).
+    pub ignored: usize,
+    /// A *later* block was broken after at least one good block. The good
+    /// blocks are kept and this is reported as a warning on the node.
+    pub error: Option<Diag>,
+}
+
+/// `None` if there is no PEM block; `Some(Err)` if the *first* block is broken.
+///
+/// All blocks are decoded, so a certificate chain or a key + cert file becomes
+/// a bundle. A later broken block (a `BEGIN` without its `END`, or a body that
+/// is not base64) stops the scan: the blocks decoded so far are kept and the
+/// error is returned in `PemBundle::error` as a warning. If the first block is
+/// broken, nothing is recognised (today's behavior).
+pub(crate) fn decode_pem(s: &str) -> Option<Result<PemBundle, Diag>> {
     const BEGIN: &str = "-----BEGIN ";
-    let begin = s.find(BEGIN)?;
-    let after = &s[begin + BEGIN.len()..];
-    let label_end = after.find("-----")?;
-    let label = &after[..label_end];
-    if label.contains('\n') {
+    let mut blocks: Vec<PemBlock> = Vec::new();
+    let mut cursor = 0;
+    let mut stop_at = s.len();
+    let mut error: Option<Diag> = None;
+    while let Some(rel) = s[cursor..].find(BEGIN) {
+        let begin = cursor + rel;
+        let after = &s[begin + BEGIN.len()..];
+        let Some(label_end) = after.find("-----") else {
+            // A `BEGIN` with no closing dashes is not PEM (as before).
+            if blocks.is_empty() {
+                return None;
+            }
+            stop_at = begin;
+            break;
+        };
+        let label = &after[..label_end];
+        if label.contains('\n') {
+            if blocks.is_empty() {
+                return None;
+            }
+            stop_at = begin;
+            break;
+        }
+        let body_start = begin + BEGIN.len() + label_end + 5;
+        let end_marker = format!("-----END {label}-----");
+        let Some(rel_end) = s[body_start..].find(&end_marker) else {
+            let d = Diag::new(
+                "PEM_UNTERMINATED",
+                format!("missing {end_marker}"),
+                Some(begin),
+            );
+            if blocks.is_empty() {
+                return Some(Err(d));
+            }
+            stop_at = begin;
+            error = Some(d);
+            break;
+        };
+        let body: String = s[body_start..body_start + rel_end]
+            .lines()
+            .filter(|l| !l.contains(':')) // RFC 1421 headers, e.g. Proc-Type
+            .map(str::trim)
+            .collect();
+        let b64 = match decode_b64(&body) {
+            Ok(b) => b,
+            Err(mut e) => {
+                e.offset = Some(body_start);
+                if blocks.is_empty() {
+                    return Some(Err(e));
+                }
+                stop_at = begin;
+                error = Some(e);
+                break;
+            }
+        };
+        let end = body_start + rel_end + end_marker.len();
+        blocks.push(PemBlock {
+            label: label.to_string(),
+            b64,
+            range: [begin, end],
+        });
+        cursor = end;
+    }
+    if blocks.is_empty() {
         return None;
     }
-    let body_start = begin + BEGIN.len() + label_end + 5;
-    let end_marker = format!("-----END {label}-----");
-    let Some(rel_end) = s[body_start..].find(&end_marker) else {
-        return Some(Err(Diag::new(
-            "PEM_UNTERMINATED",
-            format!("missing {end_marker}"),
-            Some(begin),
-        )));
-    };
-    let body: String = s[body_start..body_start + rel_end]
-        .lines()
-        .filter(|l| !l.contains(':')) // RFC 1421 headers, e.g. Proc-Type
-        .map(str::trim)
-        .collect();
-    let b64 = match decode_b64(&body) {
-        Ok(b) => b,
-        Err(mut e) => {
-            e.offset = Some(body_start);
-            return Some(Err(e));
-        }
-    };
-    let rest = &s[body_start + rel_end + end_marker.len()..];
-    Some(Ok(Pem {
-        label: label.to_string(),
-        b64,
-        trailing: !rest.trim().is_empty() || !s[..begin].trim().is_empty(),
+    let ignored = count_ignored(s, &blocks, stop_at);
+    Some(Ok(PemBundle {
+        blocks,
+        ignored,
+        error,
     }))
+}
+
+/// Number of non-whitespace bytes outside every block, considering only
+/// `s[..limit]`. When a later block is broken, `limit` is that block's start,
+/// so the cut-off text is not also reported as trailing data.
+fn count_ignored(s: &str, blocks: &[PemBlock], limit: usize) -> usize {
+    let mut ignored = 0;
+    let mut cursor = 0;
+    for b in blocks {
+        if b.range[0] >= limit {
+            break;
+        }
+        ignored += non_ws(&s[cursor..b.range[0]]);
+        cursor = b.range[1];
+    }
+    ignored + non_ws(&s[cursor..limit])
+}
+
+fn non_ws(t: &str) -> usize {
+    t.bytes().filter(|b| !b.is_ascii_whitespace()).count()
 }

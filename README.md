@@ -31,7 +31,7 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 | hex | whitespace, `:` and `0x` separators |
 | hex dumps | `xxd` (any `-g`) and `hexdump -C` (with `*` repeats); the ASCII column is ignored |
 | base64 | standard and URL-safe alphabets, padded and unpadded, line-wrapped |
-| PEM | any label; RFC 1421 headers skipped |
+| PEM | any label; RFC 1421 headers skipped; multiple blocks (chain, key + cert) become a `bundle` of per-block layers |
 | JWT | JWS (3 parts) and JWE (5 parts); each part decoded, and `exp`/`nbf`/`iat` rendered as ISO-8601 UTC |
 | protobuf | schemaless; groups, negative varints, fixed32/64 as int and float |
 | DER / ASN.1 | X.509, PKCS, CMS; ~85 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
@@ -50,6 +50,7 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
 --alts <N>                           interpretations kept per LEN field (default 3)
 --get <PATH>                         protobuf: field numbers, e.g. 1.3[2].4
                                      DER: 0-based child indices, e.g. 0.0.6
+                                     PEM bundle: first index picks the block, e.g. 1.0.0.5
 --format <json|tree|raw>             raw writes a --get selection's payload bytes
 ```
 

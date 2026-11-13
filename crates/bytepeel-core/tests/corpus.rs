@@ -74,7 +74,35 @@ fn jwe_token() -> String {
 fn parts_of(n: &Node) -> (&[Node], &[(&'static str, String)]) {
     match &n.detail {
         Detail::Parts { parts, times } => (parts, times),
-        d => panic!("not a JWT: {d:?}"),
+        d => panic!("not a Parts node: {d:?}"),
+    }
+}
+
+/// Structural DER equality, ignoring absolute byte ranges.
+fn same_der(a: &Asn1, b: &Asn1) -> bool {
+    if a.class != b.class
+        || a.number != b.number
+        || a.constructed != b.constructed
+        || a.raw != b.raw
+        || a.content[1] - a.content[0] != b.content[1] - b.content[0]
+    {
+        return false;
+    }
+    match (&a.value, &b.value) {
+        (Asn1Value::Constructed(x), Asn1Value::Constructed(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_der(p, q))
+        }
+        (
+            Asn1Value::Encapsulated {
+                unused_bits: u,
+                items: x,
+            },
+            Asn1Value::Encapsulated {
+                unused_bits: v,
+                items: y,
+            },
+        ) => u == v && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_der(p, q)),
+        _ => a.value == b.value,
     }
 }
 
@@ -365,6 +393,218 @@ fn pem_with_der_payload() {
     let c = child(&n);
     assert_eq!(c.codec, Codec::Der);
     assert!(c.warnings.is_empty());
+}
+
+#[test]
+fn pem_bundle_chain_and_select() {
+    let single = auto(ISRG_X2.as_bytes());
+    let chain = format!("{ISRG_X2}{ISRG_X2}");
+    let n = auto(chain.as_bytes());
+    assert_eq!(n.codec, Codec::Bundle);
+    assert_eq!(n.confidence, 0.99);
+    assert_eq!(n.range, [0, chain.len()]);
+    assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+
+    let (parts, times) = parts_of(&n);
+    assert_eq!(parts.len(), 2);
+    assert!(times.is_empty());
+    for p in parts {
+        assert!(
+            matches!(&p.codec, Codec::Pem { label } if label == "CERTIFICATE"),
+            "{:?}",
+            p.codec
+        );
+        assert_eq!(p.confidence, 0.99);
+        assert_eq!(child(p).codec, Codec::Der);
+    }
+    // Each block's range begins at its own BEGIN marker.
+    for p in parts {
+        assert_eq!(
+            &chain[p.range[0]..p.range[0] + 10],
+            "-----BEGIN",
+            "{:?}",
+            p.range
+        );
+    }
+
+    // `1.<der path>` addresses the second certificate's subject.
+    let sub_b = select_der(&n, "1.0.0.5").unwrap();
+    let sub_s = select_der(&single, "0.0.5").unwrap();
+    assert_eq!(sub_b.tag_name(), "SEQUENCE");
+    assert!(same_der(sub_b, sub_s));
+    // The first block's subject needs the block index first: `0.0.0.5`.
+    assert!(same_der(select_der(&n, "0.0.0.5").unwrap(), sub_s));
+
+    assert!(is_der(&n));
+    assert_eq!(select_der(&n, "9.0").unwrap_err().code, "PATH_NOT_FOUND");
+    assert_eq!(select_der(&n, "1").unwrap_err().code, "PATH_NOT_FOUND");
+
+    let t = to_tree(&n);
+    assert!(t.starts_with("bundle [0.."), "{t}");
+    assert!(t.contains("(2 blocks)"), "{t}");
+    let j = to_json(&n);
+    assert!(j.contains(r#""codec":"bundle""#), "{j}");
+    assert!(
+        j.contains(r#""parts":["#) && !j.contains(r#""times""#),
+        "{j}"
+    );
+}
+
+#[test]
+fn pem_bundle_key_and_cert() {
+    let der = h("3003020105");
+    let pem = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n\
+         -----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        b64(&der),
+        b64(&der)
+    );
+    let n = auto(pem.as_bytes());
+    assert_eq!(n.codec, Codec::Bundle);
+    let (parts, _) = parts_of(&n);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(
+        parts[0].codec,
+        Codec::Pem {
+            label: "CERTIFICATE".into()
+        }
+    );
+    assert_eq!(
+        parts[1].codec,
+        Codec::Pem {
+            label: "PRIVATE KEY".into()
+        }
+    );
+    // Select into the second block: block 1, top-level element 0, child 0.
+    let e = select_der(&n, "1.0.0").unwrap();
+    assert_eq!(e.tag_name(), "INTEGER");
+    assert!(
+        asn1_to_json(e).contains(r#""int":"5""#),
+        "{}",
+        asn1_to_json(e)
+    );
+}
+
+#[test]
+fn pem_bundle_ignores_surrounding_text() {
+    let block = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        b64(&h("3003020105"))
+    );
+    let text =
+        format!("subject=/CN=x\n{block}Bag Attributes\n  friendlyName: y\n{block}trailing\n");
+    let n = auto(text.as_bytes());
+    assert_eq!(n.codec, Codec::Bundle);
+    let (parts, _) = parts_of(&n);
+    assert_eq!(parts.len(), 2);
+    assert!(parts.iter().all(|p| p.warnings.is_empty()));
+    assert_eq!(n.warnings.len(), 1);
+    assert_eq!(n.warnings[0].code, "TRAILING_DATA");
+    // The message reports the non-whitespace bytes outside the blocks.
+    let mut ignored = 0;
+    let mut cursor = 0;
+    for p in parts {
+        ignored += text[cursor..p.range[0]]
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .count();
+        cursor = p.range[1];
+    }
+    ignored += text[cursor..]
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .count();
+    assert!(
+        n.warnings[0].message.contains(&format!("{ignored} bytes")),
+        "{}",
+        n.warnings[0].message
+    );
+}
+
+#[test]
+fn single_pem_block_is_unchanged() {
+    let pem = format!("-----BEGIN X-----\n{}\n-----END X-----\n", b64(b"\x01\x02"));
+    let n = auto(pem.as_bytes());
+    assert_eq!(n.codec, Codec::Pem { label: "X".into() });
+    assert!(n.warnings.is_empty());
+    assert_eq!(child(&n).codec, Codec::Bytes);
+
+    // Text around a single block stays on the pem node (with a counted warning).
+    let padded = format!("before\n{pem}after\n");
+    let n = auto(padded.as_bytes());
+    assert_eq!(n.codec, Codec::Pem { label: "X".into() });
+    assert_eq!(n.warnings.len(), 1);
+    assert_eq!(n.warnings[0].code, "TRAILING_DATA");
+    assert!(
+        n.warnings[0].message.contains(" bytes"),
+        "{}",
+        n.warnings[0].message
+    );
+}
+
+#[test]
+fn pem_truncated_tail_keeps_good_block() {
+    // A complete certificate followed by a copy cut off mid-base64 (no END).
+    let truncated = &ISRG_X2[..ISRG_X2.find("-----END").unwrap() / 2];
+    let text = format!("{ISRG_X2}{truncated}");
+    let n = auto(text.as_bytes());
+    // The good block is kept; the cut-off block is reported as a warning.
+    assert_eq!(
+        n.codec,
+        Codec::Pem {
+            label: "CERTIFICATE".into()
+        }
+    );
+    assert_eq!(child(&n).codec, Codec::Der);
+    assert_eq!(n.warnings.len(), 1, "{:?}", n.warnings);
+    assert_eq!(n.warnings[0].code, "PEM_UNTERMINATED");
+    assert_eq!(n.warnings[0].offset, Some(ISRG_X2.len()));
+    // The cut-off region is not double-counted as trailing data.
+    assert!(!to_json(&n).contains("TRAILING_DATA"), "{}", to_json(&n));
+}
+
+#[test]
+fn pem_bundle_truncated_tail() {
+    let truncated = &ISRG_X2[..ISRG_X2.find("-----END").unwrap() / 2];
+    let text = format!("{ISRG_X2}{ISRG_X2}{truncated}");
+    let n = auto(text.as_bytes());
+    assert_eq!(n.codec, Codec::Bundle);
+    let (parts, _) = parts_of(&n);
+    assert_eq!(parts.len(), 2);
+    assert!(parts.iter().all(|p| child(p).codec == Codec::Der));
+    assert_eq!(n.warnings.len(), 1, "{:?}", n.warnings);
+    assert_eq!(n.warnings[0].code, "PEM_UNTERMINATED");
+    assert_eq!(n.warnings[0].offset, Some(2 * ISRG_X2.len()));
+    let t = to_tree(&n);
+    assert!(t.contains("(2 blocks)"), "{t}");
+    assert!(t.contains("PEM_UNTERMINATED"), "{t}");
+}
+
+#[test]
+fn pem_later_bad_base64_is_a_warning() {
+    // A later block with a matching END but a body that is not base64.
+    let bad = "-----BEGIN X-----\n!!!!\n-----END X-----\n";
+    let text = format!("{ISRG_X2}{bad}");
+    let n = auto(text.as_bytes());
+    assert_eq!(
+        n.codec,
+        Codec::Pem {
+            label: "CERTIFICATE".into()
+        }
+    );
+    assert_eq!(n.warnings.len(), 1, "{:?}", n.warnings);
+    assert_eq!(n.warnings[0].code, "INVALID_CHAR");
+    let body_start = ISRG_X2.len() + "-----BEGIN X-----".len();
+    assert_eq!(n.warnings[0].offset, Some(body_start));
+}
+
+#[test]
+fn pem_mismatched_end_label_is_not_a_block() {
+    // A missing END (here a mismatched label) is not recognised as PEM, as before.
+    let pem = "-----BEGIN CERTIFICATE-----\nAA==\n-----END PRIVATE KEY-----\n";
+    assert_eq!(auto(pem.as_bytes()).codec, Codec::Utf8);
+    let no_end = "-----BEGIN CERTIFICATE-----\nAA==\n";
+    assert_eq!(auto(no_end.as_bytes()).codec, Codec::Utf8);
 }
 
 #[test]
@@ -773,6 +1013,14 @@ fn json_is_valid_and_deterministic() {
         h("3006 0201ff 020100"),
         h("308103 020105"),
         ISRG_X2.as_bytes().to_vec(),
+        format!("{ISRG_X2}{ISRG_X2}").into_bytes(),
+        format!(
+            "{ISRG_X2}{}",
+            &ISRG_X2[..ISRG_X2.find("-----END").unwrap() / 2]
+        )
+        .into_bytes(),
+        format!("subject=/CN=x\n{ISRG_X2}Bag Attributes\n    friendlyName: y\n{ISRG_X2}tail\n")
+            .into_bytes(),
         XXD.as_bytes().to_vec(),
         include_bytes!("fixtures/msg.bin.gz").to_vec(),
         include_bytes!("fixtures/two-members.gz").to_vec(),

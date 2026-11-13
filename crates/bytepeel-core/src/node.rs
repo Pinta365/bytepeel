@@ -36,6 +36,8 @@ pub enum Codec {
     Pem {
         label: String,
     },
+    /// Two or more PEM blocks: a certificate chain or a key + cert file.
+    Bundle,
     /// A JSON Web Token; `kind` is `jws` (3 parts) or `jwe` (5 parts).
     Jwt {
         kind: &'static str,
@@ -59,6 +61,7 @@ impl Codec {
             Codec::Dump { .. } => "dump",
             Codec::Base64 { .. } => "base64",
             Codec::Pem { .. } => "pem",
+            Codec::Bundle => "bundle",
             Codec::Jwt { .. } => "jwt",
             Codec::Gzip { .. } => "gzip",
             Codec::Zlib => "zlib",
@@ -89,9 +92,10 @@ pub enum Detail {
     Message { fields: Vec<Field> },
     /// DER-encoded ASN.1: one or more top-level elements.
     Der { items: Vec<Asn1> },
-    /// A JWT: one base64 layer node per dot-separated part, plus the
+    /// A JWT or a PEM bundle: one node per part (base64 segments, or PEM
+    /// blocks). `times` is `Detail::Parts`' only JWT-specific field: the
     /// top-level time claims of a JWS payload (`exp`, `nbf`, `iat`), in that
-    /// order, as `(claim, ISO-8601 UTC)`.
+    /// order, as `(claim, ISO-8601 UTC)`; it is empty for bundles.
     Parts {
         parts: Vec<Node>,
         times: Vec<(&'static str, String)>,

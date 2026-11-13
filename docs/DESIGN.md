@@ -29,7 +29,8 @@ alternatives instead of guessing silently.
 
 ```
 input ─┬─ text? ─► best text layer (PEM | JWT | xxd/hexdump | hex | base64) ─► recurse on decoded bytes
-       │            JWT recurses into one base64 layer per dot-separated part
+       │            JWT recurses into one base64 layer per dot-separated part;
+       │            a PEM bundle recurses into one pem layer per block
        └─ bytes ─► gzip | zlib | zstd (checksum-verified) ─► recurse on decompressed bytes
                  └► DER (a single well-formed SEQUENCE) ─► element tree
                  └► magic sniff (png/zip) ─► leaf + UNSUPPORTED_FORMAT
@@ -60,8 +61,8 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
 
 ```jsonc
 {
-  "codec": "hex" | "dump" | "base64" | "pem" | "jwt" | "gzip" | "zlib" | "zstd"
-         | "protobuf" | "der" | "utf8" | "bytes",
+  "codec": "hex" | "dump" | "base64" | "pem" | "bundle" | "jwt" | "gzip" | "zlib"
+         | "zstd" | "protobuf" | "der" | "utf8" | "bytes",
   "alphabet": "std" | "url", "padded": bool,   // base64 only
   "label": "CERTIFICATE",                      // pem only
   "style": "xxd" | "hexdump",                  // dump only
@@ -73,7 +74,7 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
   "decoded_len": N, "child": Node,             // hex | dump | base64 | pem | gzip | zlib | zstd
   "fields": [Field],                           // protobuf
   "items": [Element],                          // der
-  "parts": [Node], "times": {"exp": "..."},    // jwt
+  "parts": [Node], "times": {"exp": "..."},    // jwt | bundle (times: jwt only)
   "text": "...", "truncated": true?,           // utf8 (capped at 1024 chars)
   "len": N, "hex": "...", "truncated": true?,  // bytes (hex capped at 64 bytes)
   "warnings": [Diag]                           // omitted when empty
@@ -152,6 +153,31 @@ order and only when present. A fractional part is truncated toward zero;
 exponent notation, non-numbers and `i64` overflow are ignored. Nested claims
 (inside objects/arrays/strings) are never read. JWE tokens carry no `times`.
 
+### Bundle (PEM)
+
+```jsonc
+{ "codec": "bundle", "range": [0, N], "confidence": 0.99,
+  "parts": [                                 // one pem layer node per block, in order
+    { "codec": "pem", "label": "CERTIFICATE",
+      "range": [s, e],                       // BEGIN line start .. END line end
+      "decoded_len": L, "child": Node }      // child parsed from the block's DER
+  ]
+}
+```
+
+A single PEM block stays a plain `pem` node. Two or more blocks become a
+`bundle`. Each part's `range` is its block's `BEGIN..END` extent in the input
+text and its `child` starts a new buffer at the block's decoded bytes. A
+`TRAILING_DATA` warning is emitted once, on the bundle, when non-whitespace
+text sits outside all blocks; the message reports the number of ignored bytes.
+
+A realistic truncated paste (a good block followed by a cut-off one) is not
+discarded: the blocks decoded so far are kept and the break becomes a warning
+on the resulting node — `PEM_UNTERMINATED` (offset at the cut-off `BEGIN`) or
+the base64 error. The text from the broken block onward is excluded from the
+`TRAILING_DATA` count. If the *first* block is broken, nothing is recognised
+and the input stays text (as before).
+
 ### Number encoding
 
 - 64-bit integers (varint views, `fixed64`, `sfixed64`, packed values) are
@@ -171,6 +197,8 @@ A `range` points into the buffer the node or field was parsed from:
   buffer, so nested fields have absolute offsets within it.
 - A string alt's `decoded` node starts a new buffer at that string's bytes.
 - A JWT part's `child` starts a new buffer at that part's decoded bytes.
+- A PEM bundle part's `range` is its block in the input text, and its `child`
+  starts a new buffer at the block's decoded bytes.
 - DER elements at any nesting depth (encapsulated ones included) use offsets
   into the same DER buffer.
 
@@ -180,6 +208,8 @@ A `range` points into the buffer the node or field was parsed from:
   (`1.3[2].4`). A LEN field is entered through its best `message` alt.
 - DER: 0-based child indices separated by `.`; the first segment indexes the
   top-level elements, so `0.0.6` is a certificate's subjectPublicKeyInfo.
+  For a PEM bundle the first segment picks the block, so `1.0.0.5` is the
+  second certificate's subject (`is_der` is true only when every block is DER).
   Encapsulating BIT/OCTET STRINGs are entered like constructed elements.
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
@@ -196,6 +226,7 @@ A `range` points into the buffer the node or field was parsed from:
 | Base64: only hex chars / no digit and no symbol | ×0.5 / ×0.6 |
 | Dump (`xxd` / `hexdump -C`) | 0.98; needs an offset-0 first line with `:` (xxd) or two spaces and a `|` column (hexdump), contiguous offsets, ≥1 byte |
 | JWT | 0.97; 3 (`jws`) or 5 (`jwe`) dot-separated unpadded base64url segments whose header is canonical base64url for printable UTF-8 JSON starting with `{` and containing `"alg"`; any segment may be empty |
+| PEM bundle | 0.99; 2+ `BEGIN`/`END` blocks, each label matching between `BEGIN` and `END` (one block stays a `pem` node); non-whitespace text outside all blocks → a single `TRAILING_DATA` warning carrying the ignored byte count; a *later* broken block stops the scan and becomes a warning on the node (`PEM_UNTERMINATED`, or the base64 error) with its offset, keeping the blocks before it |
 | Text layer threshold: top level / nested | > 0.5 / > 0.75 (nested also needs hex ≥8 chars, base64 ≥16 chars) |
 | Protobuf plausibility | starts at 0.9; ×0.85 per overlong varint, ×0.5 if a field number >1000 (×0.3 if >100k), ×0.7 per group, ×0.6 per wire-type conflict, ×0.6 for a single field in ≤3 bytes |
 | DER (auto) | buffer starts with `0x30`, ≥4 bytes, parses as exactly one element with no malformed universal content: 0.95 (0.8 plus `NONCANONICAL_DER` for non-minimal lengths or integers) |
@@ -223,7 +254,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | `MIXED_ALPHABET` | Base64 mixes `+/` with `-_` |
 | `BAD_PADDING` | Wrong `=` count, or data after padding |
 | `INVALID_LENGTH` | Base64 length ≡ 1 (mod 4) |
-| `PEM_UNTERMINATED` | `BEGIN` without matching `END` |
+| `PEM_UNTERMINATED` | `BEGIN` without matching `END`: an error when the first block is broken, a warning when a later block is cut off (earlier blocks are kept) |
 | `TRUNCATED_VARINT` | Varint runs past the end of the buffer |
 | `VARINT_OVERFLOW` | Varint exceeds 64 bits |
 | `FIELD_NUMBER_ZERO` / `FIELD_NUMBER_TOO_LARGE` | Invalid protobuf field number |
@@ -242,7 +273,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
 | Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB |
 | Warning: `NONCANONICAL_BASE64` | Unused trailing bits are set |
-| Warning: `TRAILING_DATA` | Text outside the first PEM block, or bytes after a compressed stream, were ignored |
+| Warning: `TRAILING_DATA` | Non-whitespace text outside PEM blocks (the message reports the ignored byte count), or bytes after a compressed stream, were ignored |
 | Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
 | Warning: `UNSUPPORTED_FORMAT` | Recognized by magic bytes; decoder not implemented, or its Cargo feature is off |
 
@@ -252,7 +283,6 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   for field 4 or higher and every length is ≥32) is reported as text. Use
   `--as protobuf`.
 - Packed fields are only tried as varints, not as fixed32/fixed64.
-- Only the first PEM block is decoded.
 - JWT time claims are read only from a JWS payload that is a JSON object;
   fractional seconds are truncated, exponent notation is ignored, and JWE
   tokens have no claims.
@@ -264,7 +294,6 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 ## Roadmap
 
 1. CBOR and MessagePack
-2. Multiple PEM blocks
-3. `cargo-fuzz` targets for every parser (round-trip property tests exist)
-4. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
-5. WASM build of `bytepeel-core` → npm package
+2. `cargo-fuzz` targets for every parser (round-trip property tests exist)
+3. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
+4. WASM build of `bytepeel-core` → npm package

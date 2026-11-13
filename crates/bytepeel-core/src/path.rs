@@ -1,7 +1,7 @@
 //! Field selection by path, e.g. `1.3[2].4`.
 
 use crate::Diag;
-use crate::node::{AltKind, Asn1, Detail, Field, FieldValue, Node};
+use crate::node::{AltKind, Asn1, Codec, Detail, Field, FieldValue, Node};
 
 /// Select a protobuf field by path.
 ///
@@ -113,19 +113,48 @@ fn field_children(f: &Field) -> Option<&[Field]> {
 ///
 /// Segments are 0-based child indices separated by `.`: the first indexes the
 /// top-level elements, so `0.0.6` is the subjectPublicKeyInfo of a certificate.
-/// Text layers are descended automatically, and BIT STRING / OCTET STRING
-/// elements with encapsulated DER are entered like constructed ones.
+/// For a PEM bundle, the first segment picks the block and the rest is the DER
+/// path within it, so `1.0.0.5` is the second certificate's subject. Text
+/// layers are descended automatically, and BIT STRING / OCTET STRING elements
+/// with encapsulated DER are entered like constructed ones.
 pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
     let segs = parse_indices(path)?;
-    let mut items = der_items(root)
-        .ok_or_else(|| Diag::new("PATH_NOT_MESSAGE", "the input did not decode to DER", None))?;
-    let mut cur: Option<&Asn1> = None;
-    for (i, &idx) in segs.iter().enumerate() {
+    let (mut items, start) = match bundle_parts(root) {
+        Some(parts) => {
+            let block = segs[0];
+            let part = parts.get(block).ok_or_else(|| {
+                Diag::new("PATH_NOT_FOUND", format!("no bundle block {block}"), None)
+            })?;
+            let items = der_items(part).ok_or_else(|| {
+                Diag::new(
+                    "PATH_NOT_MESSAGE",
+                    format!("bundle block {block} is not DER"),
+                    None,
+                )
+            })?;
+            if segs.len() == 1 {
+                return Err(Diag::new(
+                    "PATH_NOT_FOUND",
+                    "a bundle path needs an element index after the block",
+                    None,
+                ));
+            }
+            (items, 1)
+        }
+        None => (
+            der_items(root).ok_or_else(|| {
+                Diag::new("PATH_NOT_MESSAGE", "the input did not decode to DER", None)
+            })?,
+            0,
+        ),
+    };
+    let mut cur: Option<&'a Asn1> = None;
+    for (i, &idx) in segs[start..].iter().enumerate() {
         if let Some(parent) = cur {
             items = parent.children().ok_or_else(|| {
                 Diag::new(
                     "PATH_NOT_MESSAGE",
-                    format!("element at '{}' has no children", join(&segs[..i])),
+                    format!("element at '{}' has no children", join(&segs[..start + i])),
                     None,
                 )
             })?;
@@ -133,7 +162,7 @@ pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
         cur = Some(items.get(idx).ok_or_else(|| {
             Diag::new(
                 "PATH_NOT_FOUND",
-                format!("no element '{}'", join(&segs[..=i])),
+                format!("no element '{}'", join(&segs[..=start + i])),
                 None,
             )
         })?);
@@ -141,9 +170,22 @@ pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
     Ok(cur.expect("path has at least one segment"))
 }
 
-/// True when `node` (after any text layers) is DER, so paths are element indices.
+/// True when `node` (after any text layers) is DER, so paths are element
+/// indices. A PEM bundle counts when every block is DER.
 pub fn is_der(node: &Node) -> bool {
+    if let Some(parts) = bundle_parts(node) {
+        return !parts.is_empty() && parts.iter().all(|p| der_items(p).is_some());
+    }
     der_items(node).is_some()
+}
+
+/// The parts of a PEM bundle node, if `node` (after text layers) is one.
+fn bundle_parts(node: &Node) -> Option<&[Node]> {
+    match &node.detail {
+        Detail::Parts { parts, .. } if matches!(node.codec, Codec::Bundle) => Some(parts),
+        Detail::Layer { child, .. } => bundle_parts(child),
+        _ => None,
+    }
 }
 
 fn der_items(node: &Node) -> Option<&[Asn1]> {

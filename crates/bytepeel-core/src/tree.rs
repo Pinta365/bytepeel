@@ -92,6 +92,9 @@ fn node(o: &mut String, n: &Node, d: usize) {
             }
         }
         Detail::Parts { parts, times } => {
+            if matches!(n.codec, Codec::Bundle) {
+                let _ = write!(o, " ({} blocks)", parts.len());
+            }
             o.push('\n');
             for p in parts {
                 node(o, p, d + 1);

@@ -41,7 +41,7 @@ pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
                                     let child = finish(&c.decoded, 1, opts)?;
                                     layer_node(c, input.len(), child)
                                 }
-                                Picked::Jwt(node) => node,
+                                Picked::Ready(node) => node,
                             });
                         }
                     }
@@ -179,14 +179,15 @@ pub(crate) fn nested_text_layer(t: &str, depth: usize, opts: &Options) -> Option
             let child = detect(&c.decoded, depth + 1, opts, Mode::Nested);
             Some(layer_node(c, t.len(), child))
         }
-        Picked::Jwt(node) => Some(node),
+        Picked::Ready(node) => Some(node),
     }
 }
 
-/// A candidate text layer: bytes that still need a child, or a finished node.
+/// A candidate text layer: bytes that still need a child, or a finished node
+/// (JWT, PEM bundle) that already built its own part nodes.
 enum Picked {
     Layer(Cand),
-    Jwt(Node),
+    Ready(Node),
 }
 
 fn keep(best: &mut Option<(f64, Picked)>, conf: f64, p: Picked) {
@@ -197,28 +198,37 @@ fn keep(best: &mut Option<(f64, Picked)>, conf: f64, p: Picked) {
 
 fn best_layer(t: &str, nested: bool, depth: usize, opts: &Options) -> Option<Picked> {
     let mut best: Option<(f64, Picked)> = None;
-    if let Some(Ok(p)) = text::decode_pem(t) {
-        let mut warnings = Vec::new();
-        if p.trailing {
-            warnings.push(Diag::new(
-                "TRAILING_DATA",
-                "text outside the first PEM block was ignored",
-                None,
-            ));
+    if let Some(Ok(b)) = text::decode_pem(t) {
+        if b.blocks.len() == 1 {
+            let blk = b.blocks.into_iter().next().expect("checked one block");
+            let mut warnings = Vec::new();
+            if b.ignored > 0 {
+                warnings.push(trailing_diag(b.ignored));
+            }
+            if blk.b64.noncanonical {
+                warnings.push(text::noncanonical_diag());
+            }
+            // A later broken block is reported on the (otherwise good) node.
+            if let Some(e) = b.error {
+                warnings.push(e);
+            }
+            keep(
+                &mut best,
+                0.99,
+                Picked::Layer(Cand {
+                    codec: Codec::Pem { label: blk.label },
+                    decoded: blk.b64.bytes,
+                    conf: 0.99,
+                    warnings,
+                }),
+            );
+        } else {
+            keep(
+                &mut best,
+                0.99,
+                Picked::Ready(bundle_node(t, b, depth, opts)),
+            );
         }
-        if p.b64.noncanonical {
-            warnings.push(text::noncanonical_diag());
-        }
-        keep(
-            &mut best,
-            0.99,
-            Picked::Layer(Cand {
-                codec: Codec::Pem { label: p.label },
-                decoded: p.b64.bytes,
-                conf: 0.99,
-                warnings,
-            }),
-        );
     }
     if let Some(Ok(d)) = dump::decode_dump(t) {
         keep(
@@ -233,7 +243,7 @@ fn best_layer(t: &str, nested: bool, depth: usize, opts: &Options) -> Option<Pic
         );
     }
     if let Some(node) = jwt_node(t, depth, opts) {
-        keep(&mut best, 0.97, Picked::Jwt(node));
+        keep(&mut best, 0.97, Picked::Ready(node));
     }
     let core_len = t.trim().len();
     if !nested || core_len >= 8 {
@@ -277,6 +287,58 @@ fn best_layer(t: &str, nested: bool, depth: usize, opts: &Options) -> Option<Pic
         TOP_THRESHOLD
     };
     best.filter(|(c, _)| *c > threshold).map(|(_, p)| p)
+}
+
+fn trailing_diag(bytes: usize) -> Diag {
+    Diag::new(
+        "TRAILING_DATA",
+        format!("{bytes} bytes outside the PEM blocks were ignored"),
+        None,
+    )
+}
+
+/// Build the full bundle node: one pem layer node per block, each with its
+/// child detected normally (certificates become DER).
+fn bundle_node(t: &str, b: text::PemBundle, depth: usize, opts: &Options) -> Node {
+    let parts = b
+        .blocks
+        .into_iter()
+        .map(|blk| {
+            let mut warnings = Vec::new();
+            if blk.b64.noncanonical {
+                warnings.push(text::noncanonical_diag());
+            }
+            let child = detect(&blk.b64.bytes, depth + 1, opts, Mode::Nested);
+            Node {
+                codec: Codec::Pem { label: blk.label },
+                range: blk.range,
+                confidence: 0.99,
+                detail: Detail::Layer {
+                    decoded: blk.b64.bytes,
+                    child: Box::new(child),
+                },
+                warnings,
+            }
+        })
+        .collect();
+    let mut warnings = Vec::new();
+    if b.ignored > 0 {
+        warnings.push(trailing_diag(b.ignored));
+    }
+    // A later broken block is reported once, on the bundle.
+    if let Some(e) = b.error {
+        warnings.push(e);
+    }
+    Node {
+        codec: Codec::Bundle,
+        range: [0, t.len()],
+        confidence: 0.99,
+        detail: Detail::Parts {
+            parts,
+            times: vec![],
+        },
+        warnings,
+    }
 }
 
 /// Build the full JWT node: a base64 layer node per part, with the header and
