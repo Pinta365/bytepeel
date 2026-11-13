@@ -1,5 +1,6 @@
 //! Layer detection: decides what each buffer is and recurses.
 
+use crate::cbor;
 use crate::compress::{self, Outcome};
 use crate::jwt;
 use crate::node::{Alphabet, Codec, Detail, Node};
@@ -140,6 +141,10 @@ fn forced(buf: &[u8], depth: usize, opts: &Options, f: Force) -> Result<Node, Di
             let items = der::parse(buf, &mut st)?;
             Ok(der_node(buf.len(), items, &st))
         }
+        Force::Cbor => {
+            let items = cbor::parse_sequence(buf, depth, opts)?;
+            Ok(cbor::node(items, 1.0, buf.len()))
+        }
         Force::Text => {
             let t = std::str::from_utf8(buf).map_err(|e| {
                 Diag::new(
@@ -180,6 +185,21 @@ pub(crate) fn nested_text_layer(t: &str, depth: usize, opts: &Options) -> Option
             Some(layer_node(c, t.len(), child))
         }
         Picked::Ready(node) => Some(node),
+    }
+}
+
+/// Detect further structure inside a byte string (a CBOR `bytes` value):
+/// another CBOR/DER/protobuf/compressed buffer, or a text encoding. Returns
+/// `None` for a plain text or opaque result, so callers do not echo bytes.
+/// `depth` is the child's depth.
+pub(crate) fn nested_bytes(buf: &[u8], depth: usize, opts: &Options) -> Option<Node> {
+    if depth >= opts.depth {
+        return None;
+    }
+    let n = detect(buf, depth, opts, Mode::Nested);
+    match n.codec {
+        Codec::Utf8 | Codec::Bytes => None,
+        _ => Some(n),
     }
 }
 
@@ -402,21 +422,57 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
         );
         return bytes_leaf(buf, 0.9, vec![w]);
     }
-    if depth < opts.depth {
-        if let Ok((fields, st)) = protobuf::parse_message(buf, 0, buf.len(), depth, opts) {
-            let p = protobuf::plausibility(&st, buf.len());
-            if p >= MESSAGE_THRESHOLD {
-                return Node {
-                    codec: Codec::Protobuf,
-                    range: [0, buf.len()],
-                    confidence: p,
-                    detail: Detail::Message { fields },
-                    warnings: vec![],
-                };
+    // CBOR competes with protobuf; never resolve the tie silently.
+    let cbor_cand = if depth < opts.depth {
+        cbor::detect(buf, depth, opts)
+    } else {
+        None
+    };
+    let pb_cand = if depth < opts.depth {
+        protobuf::parse_message(buf, 0, buf.len(), depth, opts)
+            .ok()
+            .map(|(fields, st)| {
+                let p = protobuf::plausibility(&st, buf.len());
+                (fields, p)
+            })
+            .filter(|(_, p)| *p >= MESSAGE_THRESHOLD)
+    } else {
+        None
+    };
+    match (cbor_cand, pb_cand) {
+        (Some((items, cconf)), Some((fields, pconf))) => {
+            if pconf > cconf {
+                let mut n = protobuf_node(fields, pconf, buf.len());
+                n.warnings.push(ambiguous_format("cbor", cconf));
+                n
+            } else {
+                let mut n = cbor::node(items, cconf, buf.len());
+                n.warnings.push(ambiguous_format("protobuf", pconf));
+                n
             }
         }
+        (Some((items, cconf)), None) => cbor::node(items, cconf, buf.len()),
+        (None, Some((fields, pconf))) => protobuf_node(fields, pconf, buf.len()),
+        (None, None) => bytes_leaf(buf, 0.5, vec![]),
     }
-    bytes_leaf(buf, 0.5, vec![])
+}
+
+fn protobuf_node(fields: Vec<crate::Field>, conf: f64, len: usize) -> Node {
+    Node {
+        codec: Codec::Protobuf,
+        range: [0, len],
+        confidence: conf,
+        detail: Detail::Message { fields },
+        warnings: vec![],
+    }
+}
+
+fn ambiguous_format(other: &str, conf: f64) -> Diag {
+    Diag::new(
+        "AMBIGUOUS_FORMAT",
+        format!("also parses as {other} (confidence {conf:.2})"),
+        None,
+    )
 }
 
 /// Recognize formats by magic bytes so they are not misread as protobuf.

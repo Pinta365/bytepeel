@@ -106,6 +106,26 @@ fn same_der(a: &Asn1, b: &Asn1) -> bool {
     }
 }
 
+fn cbor_opts() -> Options {
+    Options {
+        input: InputForm::Raw,
+        force: Some(Force::Cbor),
+        ..Options::default()
+    }
+}
+
+/// Parse `hex` as a forced CBOR sequence.
+fn cbor(hex: &str) -> Node {
+    peel(&h(hex), &cbor_opts()).unwrap()
+}
+
+fn values_of(n: &Node) -> &[Value] {
+    match &n.detail {
+        Detail::Values { items } => items,
+        d => panic!("not Values: {d:?}"),
+    }
+}
+
 fn auto(input: &[u8]) -> Node {
     peel(input, &Options::default()).unwrap()
 }
@@ -997,6 +1017,347 @@ fn jwt_time_claims_are_top_level_numbers_only() {
     }
 }
 
+// ------------------------------------------------------------ CBOR
+
+#[test]
+fn cbor_rfc8949_uints() {
+    for (hex, val) in [
+        ("00", 0u64),
+        ("01", 1),
+        ("0a", 10),
+        ("17", 23),
+        ("1818", 24),
+        ("1819", 25),
+        ("1864", 100),
+        ("1903e8", 1000),
+        ("1a000f4240", 1_000_000),
+        ("1b000000e8d4a51000", 1_000_000_000_000),
+        ("1bffffffffffffffff", u64::MAX),
+    ] {
+        let n = cbor(hex);
+        assert_eq!(values_of(&n)[0].kind, ValueKind::Uint(val), "{hex}");
+        assert!(
+            to_json(&n).contains(&format!("\"value\":\"{val}\"")),
+            "{hex}: {}",
+            to_json(&n)
+        );
+    }
+}
+
+#[test]
+fn cbor_rfc8949_nints() {
+    for (hex, n, dec) in [
+        ("20", 0u64, "-1"),
+        ("29", 9, "-10"),
+        ("3863", 99, "-100"),
+        ("3903e7", 999, "-1000"),
+        ("3bffffffffffffffff", u64::MAX, "-18446744073709551616"),
+    ] {
+        let node = cbor(hex);
+        assert_eq!(values_of(&node)[0].kind, ValueKind::Nint(n), "{hex}");
+        assert!(
+            to_json(&node).contains(&format!("\"value\":\"{dec}\"")),
+            "{hex}"
+        );
+    }
+}
+
+#[test]
+fn cbor_rfc8949_bignums() {
+    // 2^64 and -1 - 2^64.
+    let j = to_json(&cbor("c249010000000000000000"));
+    assert!(
+        j.contains(r#""name":"bignum""#) && j.contains(r#""int":"18446744073709551616""#),
+        "{j}"
+    );
+    let j = to_json(&cbor("c349010000000000000000"));
+    assert!(
+        j.contains(r#""name":"negbignum""#) && j.contains(r#""int":"-18446744073709551617""#),
+        "{j}"
+    );
+}
+
+#[test]
+fn cbor_rfc8949_floats() {
+    for (hex, val, width) in [
+        ("f90000", 0.0f64, 16u8),
+        ("f93c00", 1.0, 16),
+        ("f93e00", 1.5, 16),
+        ("f97bff", 65504.0, 16),
+        ("f90001", 5.960_464_477_539_063e-8, 16),
+        ("fa47c35000", 100000.0, 32),
+        ("fb3ff199999999999a", 1.1, 64),
+    ] {
+        match values_of(&cbor(hex))[0].kind {
+            ValueKind::Float { value, width: w } => {
+                assert_eq!(w, width, "{hex}");
+                assert_eq!(value, val, "{hex}");
+            }
+            _ => panic!("{hex} is not a float"),
+        }
+        assert!(
+            to_json(&cbor(hex)).contains(&format!("\"width\":{width}")),
+            "{hex}"
+        );
+    }
+    // -0.0, +Infinity and NaN.
+    match values_of(&cbor("f98000"))[0].kind {
+        ValueKind::Float { value, .. } => assert!(value == 0.0 && value.is_sign_negative()),
+        _ => panic!(),
+    }
+    match values_of(&cbor("f97c00"))[0].kind {
+        ValueKind::Float { value, .. } => assert_eq!(value, f64::INFINITY),
+        _ => panic!(),
+    }
+    assert!(to_json(&cbor("f97e00")).contains(r#""value":"NaN""#));
+}
+
+#[test]
+fn cbor_rfc8949_simple() {
+    assert_eq!(values_of(&cbor("f4"))[0].kind, ValueKind::Bool(false));
+    assert_eq!(values_of(&cbor("f5"))[0].kind, ValueKind::Bool(true));
+    assert_eq!(values_of(&cbor("f6"))[0].kind, ValueKind::Null);
+    assert_eq!(values_of(&cbor("f7"))[0].kind, ValueKind::Undefined);
+    assert_eq!(values_of(&cbor("f0"))[0].kind, ValueKind::Simple(16));
+    assert_eq!(values_of(&cbor("f8ff"))[0].kind, ValueKind::Simple(255));
+}
+
+#[test]
+fn cbor_rfc8949_strings_arrays_maps() {
+    assert_eq!(
+        values_of(&cbor("4401020304"))[0].kind,
+        ValueKind::Bytes {
+            data: vec![1, 2, 3, 4],
+            decoded: None
+        }
+    );
+    assert_eq!(
+        values_of(&cbor("6449455446"))[0].kind,
+        ValueKind::Text("IETF".into())
+    );
+    assert_eq!(
+        values_of(&cbor("62c3bc"))[0].kind,
+        ValueKind::Text("ü".into())
+    );
+    assert_eq!(
+        values_of(&cbor("63e6b0b4"))[0].kind,
+        ValueKind::Text("水".into())
+    );
+
+    // [1, [2, 3], [4, 5]]
+    match &values_of(&cbor("8301820203820405"))[0].kind {
+        ValueKind::Array(items) => {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0].kind, ValueKind::Uint(1));
+            assert!(matches!(items[1].kind, ValueKind::Array(ref x) if x.len() == 2));
+        }
+        _ => panic!("not an array"),
+    }
+    // {"a": 1, "b": [2, 3]}
+    match &values_of(&cbor("a26161016162820203"))[0].kind {
+        ValueKind::Map(entries) => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].0.kind, ValueKind::Text("a".into()));
+            assert_eq!(entries[0].1.kind, ValueKind::Uint(1));
+            assert_eq!(entries[1].0.kind, ValueKind::Text("b".into()));
+        }
+        _ => panic!("not a map"),
+    }
+}
+
+#[test]
+fn cbor_indefinite() {
+    let n = cbor("5f42010243030405ff");
+    assert!(values_of(&n)[0].indefinite);
+    assert_eq!(
+        values_of(&n)[0].kind,
+        ValueKind::Bytes {
+            data: vec![1, 2, 3, 4, 5],
+            decoded: None
+        }
+    );
+    assert!(
+        to_json(&n).contains(r#""indefinite":true"#),
+        "{}",
+        to_json(&n)
+    );
+
+    let n = cbor("7f657374726561646d696e67ff");
+    assert!(values_of(&n)[0].indefinite);
+    assert_eq!(values_of(&n)[0].kind, ValueKind::Text("streaming".into()));
+
+    let n = cbor("9fff");
+    assert!(values_of(&n)[0].indefinite);
+    assert_eq!(values_of(&n)[0].kind, ValueKind::Array(vec![]));
+
+    // {_ "a": 1, "b": [_ 2, 3]}
+    let n = cbor("bf61610161629f0203ffff");
+    match &values_of(&n)[0].kind {
+        ValueKind::Map(entries) => {
+            assert_eq!(entries.len(), 2);
+            assert!(entries[1].1.indefinite);
+            assert!(matches!(entries[1].1.kind, ValueKind::Array(ref x) if x.len() == 2));
+        }
+        _ => panic!("not a map"),
+    }
+}
+
+#[test]
+fn cbor_tags() {
+    // tag 0 (datetime): the text is already ISO.
+    let n = cbor("c074323031332d30332d32315432303a30343a30305a");
+    assert!(
+        matches!(&values_of(&n)[0].kind, ValueKind::Tag(0, inner) if inner.kind == ValueKind::Text("2013-03-21T20:04:00Z".into()))
+    );
+    assert!(to_json(&n).contains(r#""name":"datetime""#));
+
+    // tag 1 (epoch), int and float.
+    let j = to_json(&cbor("c11a514b67b0"));
+    assert!(
+        j.contains(r#""name":"epoch""#) && j.contains(r#""iso":"2013-03-21T20:04:00Z""#),
+        "{j}"
+    );
+    assert!(to_json(&cbor("c1fb41d452d9ec200000")).contains(r#""iso":"2013-03-21T20:04:00Z""#));
+
+    // tag 24 (embedded CBOR): the bytes decode as CBOR.
+    match &values_of(&cbor("d818456449455446"))[0].kind {
+        ValueKind::Tag(24, inner) => match &inner.kind {
+            ValueKind::Bytes {
+                decoded: Some(d), ..
+            } => {
+                assert_eq!(d.codec, Codec::Cbor);
+                assert!(to_json(d).contains(r#""value":"IETF""#));
+            }
+            _ => panic!("tag 24 should carry decoded CBOR"),
+        },
+        _ => panic!("not tag 24"),
+    }
+
+    // tag 32 (uri) and tag 37 (uuid).
+    assert!(
+        to_json(&cbor("d82076687474703a2f2f7777772e6578616d706c652e636f6d"))
+            .contains(r#""name":"uri""#)
+    );
+    let j = to_json(&cbor("d82550123456789abcdef01122334455667788"));
+    assert!(
+        j.contains(r#""uuid":"12345678-9abc-def0-1122-334455667788""#),
+        "{j}"
+    );
+}
+
+#[test]
+fn cbor_detection() {
+    // A realistic map, detected without forcing.
+    let n = auto(include_bytes!("fixtures/record.cbor"));
+    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(n.confidence, 0.9);
+    assert!(values_of(&n).len() == 1);
+    // A plain array.
+    assert_eq!(auto(&h("83010203")).codec, Codec::Cbor);
+    // A self-describe tag is near-certain.
+    assert_eq!(auto(&h("d9d9f783010203")).confidence, 0.99);
+    // Protobuf bytes are not CBOR.
+    assert_eq!(auto(&h("089601")).codec, Codec::Protobuf);
+    // Plain text is not CBOR.
+    assert_eq!(auto(b"hello world").codec, Codec::Utf8);
+}
+
+#[test]
+fn cbor_bytes_key_lowers_confidence() {
+    // {bytes(0x01): 1} has a non-text, non-small-int key.
+    let n = auto(&h("a1410101"));
+    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(n.confidence, 0.7);
+}
+
+#[test]
+fn cbor_ambiguity_is_reported() {
+    // Also a plausible protobuf (field 16 LEN len 0), but CBOR scores higher.
+    let n = auto(&h("820100"));
+    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(n.warnings.len(), 1);
+    assert_eq!(n.warnings[0].code, "AMBIGUOUS_FORMAT");
+    assert!(
+        n.warnings[0].message.contains("protobuf") && n.warnings[0].message.contains("0.54"),
+        "{}",
+        n.warnings[0].message
+    );
+
+    // Here protobuf scores higher than the CBOR map (a bytes key).
+    let n = auto(&h("a2010241081800"));
+    assert_eq!(n.codec, Codec::Protobuf);
+    assert_eq!(n.warnings.len(), 1);
+    assert_eq!(n.warnings[0].code, "AMBIGUOUS_FORMAT");
+    assert!(
+        n.warnings[0].message.contains("cbor") && n.warnings[0].message.contains("0.70"),
+        "{}",
+        n.warnings[0].message
+    );
+}
+
+#[test]
+fn cbor_errors_have_codes_and_offsets() {
+    for (hex, code, off) in [
+        ("1c", "CBOR_RESERVED", 0),
+        ("f800", "CBOR_RESERVED", 0),
+        ("ff", "CBOR_BREAK", 0),
+        ("62c3", "CBOR_TRUNCATED", 0),
+        ("61ff", "CBOR_BAD_UTF8", 1),
+    ] {
+        let e = peel(&h(hex), &cbor_opts()).unwrap_err();
+        assert_eq!((e.code, e.offset), (code, Some(off)), "{hex}");
+    }
+    // Nesting cap (101 arrays around one value).
+    let mut deep = vec![0x81u8; 101];
+    deep.push(0x00);
+    assert_eq!(
+        peel(&deep, &cbor_opts()).unwrap_err().code,
+        "NESTING_TOO_DEEP"
+    );
+    // Forced, a CBOR sequence may hold several items.
+    let n = peel(&h("0001"), &cbor_opts()).unwrap();
+    assert_eq!(values_of(&n).len(), 2);
+}
+
+#[test]
+fn cbor_select_value() {
+    let n = auto(include_bytes!("fixtures/record.cbor"));
+    assert!(is_values(&n));
+    assert!(!is_der(&n));
+    assert_eq!(select_value(&n, "id").unwrap().kind, ValueKind::Uint(42));
+    assert_eq!(
+        select_value(&n, "name").unwrap().kind,
+        ValueKind::Text("Alice".into())
+    );
+    assert_eq!(
+        select_value(&n, "tags.1").unwrap().kind,
+        ValueKind::Text("b".into())
+    );
+    assert_eq!(select_value(&n, "nope").unwrap_err().code, "PATH_NOT_FOUND");
+    assert_eq!(
+        select_value(&n, "id.x").unwrap_err().code,
+        "PATH_NOT_MESSAGE"
+    );
+    assert_eq!(select_value(&n, "a..b").unwrap_err().code, "BAD_PATH");
+
+    // Array indices, and integer map keys.
+    assert_eq!(
+        select_value(&cbor("83010203"), "1").unwrap().kind,
+        ValueKind::Uint(2)
+    );
+    assert_eq!(
+        select_value(&cbor("a1016161"), "1").unwrap().kind,
+        ValueKind::Text("a".into())
+    );
+    // value_to_json / value_to_tree on a selection.
+    let v = select_value(&n, "name").unwrap();
+    assert_eq!(
+        value_to_json(v),
+        r#"{"type":"text","range":[11,17],"value":"Alice"}"#
+    );
+    assert!(value_to_tree(v).starts_with("text [11..17] \"Alice\""));
+}
+
 // ------------------------------------------------------------ JSON
 
 #[test]
@@ -1041,6 +1402,15 @@ fn json_is_valid_and_deterministic() {
         none_token(r#"{"exp":0}"#).into_bytes(),
         jwe_token().into_bytes(),
         b"a.b.c".to_vec(),
+        include_bytes!("fixtures/record.cbor").to_vec(),
+        h("83010203"),
+        h("a26161016162820203"),
+        h("5f42010243030405ff"),
+        h("7f657374726561646d696e67ff"),
+        h("c11a514b67b0"),
+        h("c249010000000000000000"),
+        h("820100"),
+        h("f98000"),
         Vec::new(),
     ];
     for input in inputs {
@@ -1205,5 +1575,43 @@ mod json_check {
             }
         }
         Ok(())
+    }
+}
+
+#[test]
+fn cbor_tag24_chain_is_linear_and_bounded_by_depth() {
+    // 40 nested tag-24 byte strings. Each level used to be parsed twice, so
+    // the work doubled per level; it must now finish instantly, and --depth
+    // must bound how many levels are decoded.
+    fn bstr(b: &[u8]) -> Vec<u8> {
+        let mut v = match b.len() {
+            n if n < 24 => vec![0x40 | n as u8],
+            n if n < 256 => vec![0x58, n as u8],
+            n => vec![0x59, (n >> 8) as u8, n as u8],
+        };
+        v.extend_from_slice(b);
+        v
+    }
+    let mut x = vec![0xa1, 0x61, 0x61, 0x01];
+    for _ in 0..40 {
+        let mut t = vec![0xd8, 0x18];
+        t.extend(bstr(&x));
+        x = t;
+    }
+    x.insert(0, 0x81);
+    for depth in [4, 16, 64] {
+        let opts = Options {
+            depth,
+            ..Options::default()
+        };
+        let start = std::time::Instant::now();
+        let json = to_json(&peel(&x, &opts).unwrap());
+        assert!(
+            start.elapsed().as_secs() < 2,
+            "depth {depth} took {:?}",
+            start.elapsed()
+        );
+        let levels = json.matches(r#""codec":"cbor""#).count();
+        assert!(levels <= depth, "depth {depth} decoded {levels} levels");
     }
 }

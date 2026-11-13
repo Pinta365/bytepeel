@@ -16,6 +16,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod cbor;
 mod compress;
 mod der;
 mod detect;
@@ -28,14 +29,16 @@ mod path;
 mod protobuf;
 mod text;
 mod tree;
+mod value;
 pub mod varint;
 
 pub use error::Diag;
 pub use node::{
     Alphabet, Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass,
 };
-pub use path::{is_der, select, select_der};
+pub use path::{is_der, is_values, select, select_der, select_value};
 pub use text::{B64, decode_b64, decode_hex};
+pub use value::{Value, ValueKind};
 
 /// How to read the top-level input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,7 @@ pub enum InputForm {
 pub enum Force {
     Protobuf,
     Der,
+    Cbor,
     Text,
     Bytes,
 }
@@ -110,6 +114,16 @@ pub fn diag_to_json(diag: &Diag) -> String {
 /// Render a node tree as an indented, human-readable outline.
 pub fn to_tree(node: &Node) -> String {
     tree::node_to_tree(node)
+}
+
+/// Serialize a single CBOR value (e.g. the result of [`select_value`]) as JSON.
+pub fn value_to_json(v: &Value) -> String {
+    json::value_to_json(v)
+}
+
+/// Render a single CBOR value as an indented outline.
+pub fn value_to_tree(v: &Value) -> String {
+    tree::value_to_tree(v)
 }
 
 /// Serialize a single DER element (e.g. the result of [`select_der`]) as JSON.

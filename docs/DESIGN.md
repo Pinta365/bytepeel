@@ -34,8 +34,8 @@ input ─┬─ text? ─► best text layer (PEM | JWT | xxd/hexdump | hex | ba
        └─ bytes ─► gzip | zlib | zstd (checksum-verified) ─► recurse on decompressed bytes
                  └► DER (a single well-formed SEQUENCE) ─► element tree
                  └► magic sniff (png/zip) ─► leaf + UNSUPPORTED_FORMAT
-                 └► schemaless protobuf (if plausible) ─► LEN fields ranked:
-                       message | string (string may decode further) | packed_varint | bytes
+                 └► CBOR (map/array, or a self-describe tag) | schemaless protobuf:
+                       the higher confidence wins, the loser is named in AMBIGUOUS_FORMAT
                  └► bytes leaf
 ```
 
@@ -62,7 +62,7 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
 ```jsonc
 {
   "codec": "hex" | "dump" | "base64" | "pem" | "bundle" | "jwt" | "gzip" | "zlib"
-         | "zstd" | "protobuf" | "der" | "utf8" | "bytes",
+         | "zstd" | "protobuf" | "der" | "cbor" | "utf8" | "bytes",
   "alphabet": "std" | "url", "padded": bool,   // base64 only
   "label": "CERTIFICATE",                      // pem only
   "style": "xxd" | "hexdump",                  // dump only
@@ -74,6 +74,7 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
   "decoded_len": N, "child": Node,             // hex | dump | base64 | pem | gzip | zlib | zstd
   "fields": [Field],                           // protobuf
   "items": [Element],                          // der
+  "items": [Value],                            // cbor
   "parts": [Node], "times": {"exp": "..."},    // jwt | bundle (times: jwt only)
   "text": "...", "truncated": true?,           // utf8 (capped at 1024 chars)
   "len": N, "hex": "...", "truncated": true?,  // bytes (hex capped at 64 bytes)
@@ -132,6 +133,39 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
 
 Element ranges are absolute within the DER buffer, including elements inside
 encapsulating BIT/OCTET STRINGs. NULL has no value key.
+
+### Value (CBOR)
+
+A `cbor` node carries `"items": [Value]` (normally one item; a forced CBOR
+sequence may hold several). Each value has a `type`, a `range` in the CBOR
+buffer, and `"indefinite":true` when it used an indefinite-length form.
+
+```jsonc
+{ "type": "uint" | "nint" | "float" | "bool" | "null" | "undefined"
+         | "simple" | "bytes" | "text" | "array" | "map" | "tag",
+  "range": [s, e],
+  "indefinite": true?,                        // indefinite-length form
+  "value": "42",                              // uint/nint: decimal string (nint = -1-n)
+  "value": 1.5, "width": 16,                  // float: shortest form, source width 16|32|64
+  "value": true,                              // bool
+  "value": 16,                                // simple
+  "len": N, "hex": "…", "truncated": true?, "decoded": Node?,  // bytes
+  "value": "…", "truncated": true?,           // text (capped at 1024 chars)
+  "items": [Value],                           // array
+  "entries": [{"key": Value, "value": Value}],// map
+  "tag": "1", "name": "epoch",                // tag; name when known
+  "iso": "…", "int": "…", "uuid": "…",        // tag 1 / 2,3 / 37 extras
+  "value": Value                              // tag payload
+}
+```
+
+A `bytes` value's `decoded` node starts a new buffer at those bytes and is set
+when they are themselves CBOR/DER/protobuf/compressed, or a text encoding
+(never for plain text or opaque bytes). Known tag names: 0 datetime, 1 epoch,
+2 bignum, 3 negbignum, 4 decimal, 5 bigfloat, 21/22/23 base64url/base64/base16,
+24 cbor, 32 uri, 37 uuid, 55799 self-describe. Tag 1 adds `iso` (its numeric
+value as ISO-8601 UTC); tags 2/3 add `int` (a decimal bignum); tag 37 with 16
+bytes adds `uuid`; tag 24 forces the byte string's `decoded` node to CBOR.
 
 ### JWT
 
@@ -201,6 +235,8 @@ A `range` points into the buffer the node or field was parsed from:
   starts a new buffer at the block's decoded bytes.
 - DER elements at any nesting depth (encapsulated ones included) use offsets
   into the same DER buffer.
+- CBOR values use offsets into the same CBOR buffer; a `bytes` value's
+  `decoded` node starts a new buffer.
 
 ### Paths (`--get`)
 
@@ -211,6 +247,11 @@ A `range` points into the buffer the node or field was parsed from:
   For a PEM bundle the first segment picks the block, so `1.0.0.5` is the
   second certificate's subject (`is_der` is true only when every block is DER).
   Encapsulating BIT/OCTET STRINGs are entered like constructed elements.
+- CBOR: map keys / array indices separated by `.` (`users.0.name`). A segment
+  matches a text key exactly, indexes an array, or matches an integer map key;
+  tags are followed transparently and a multi-item sequence is indexed by the
+  first segment. `--format raw` writes a `bytes` value's bytes or a `text`
+  value's UTF-8.
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
@@ -231,6 +272,8 @@ A `range` points into the buffer the node or field was parsed from:
 | Protobuf plausibility | starts at 0.9; ×0.85 per overlong varint, ×0.5 if a field number >1000 (×0.3 if >100k), ×0.7 per group, ×0.6 per wire-type conflict, ×0.6 for a single field in ≤3 bytes |
 | DER (auto) | buffer starts with `0x30`, ≥4 bytes, parses as exactly one element with no malformed universal content: 0.95 (0.8 plus `NONCANONICAL_DER` for non-minimal lengths or integers) |
 | DER encapsulation | BIT STRING (unused bits 0) / OCTET STRING content ≥2 bytes that parses completely as canonical, well-formed DER; a lone primitive must have a typed universal tag |
+| CBOR (auto) | a self-describe (`d9 d9 f7`) prefix: 0.99; otherwise the buffer must parse as exactly one item of ≥2 bytes whose top level (after tags) is a map or array, with valid UTF-8 everywhere: 0.9, or 0.7 when any map key is not a text string or a small int (`|n| ≤ 23`) |
+| CBOR vs protobuf | if both accept the buffer, the higher confidence wins; the loser is named in an `AMBIGUOUS_FORMAT` warning (ties go to CBOR) |
 | gzip / zstd | magic `1f 8b 08` / `28 b5 2f fd`; decoded (confidence 1.0) only if the stream is complete and its CRC32 / content checksum matches, else a `bytes` leaf with the error as a warning |
 | zlib | a valid 2-byte header (CM 8, CINFO ≤ 7, FCHECK, no FDICT) whose stream inflates with a matching Adler-32. Failures are reported only for the common headers `78 01/5e/9c/da`; other headers fall through to DER/protobuf |
 | Decompressed size | capped at 64 MiB (`OUTPUT_TOO_LARGE`) |
@@ -269,6 +312,12 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | `BAD_LENGTH` | DER length uses more than 8 bytes |
 | `BAD_TAG` | DER tag number exceeds 32 bits |
 | `BAD_DUMP` | An `xxd`/`hexdump` line is out of sequence or malformed (offset at the line) |
+| `CBOR_TRUNCATED` | A CBOR item runs past the end of the buffer |
+| `CBOR_RESERVED` | Reserved additional information (28-30), `31` for a type that has no indefinite form, or a two-byte simple value `< 32` |
+| `CBOR_BREAK` | An unexpected `0xff` break where an item was expected |
+| `CBOR_BAD_UTF8` | A CBOR text string is not valid UTF-8 (offset at its content) |
+| `CBOR_INVALID` | An indefinite string chunk is not a definite string of the same type |
+| Warning: `AMBIGUOUS_FORMAT` | The buffer also parses as another codec; the message names it and its confidence |
 | Warning: `CORRUPT_DATA` | A gzip/zlib/zstd stream is truncated or invalid |
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
 | Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB |
@@ -287,13 +336,16 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   fractional seconds are truncated, exponent notation is ignored, and JWE
   tokens have no claims.
 - Hex dumps must start at offset 0; `od` and plain `hexdump` (non `-C`) are not parsed.
+- CBOR is auto-detected only when the top level is a map/array (or a
+  self-describe tag); a bare scalar needs `--as cbor`. JSON floats print `-0.0`
+  as `0`.
 - DER: only OIDs in a built-in table (~85) are named; BER indefinite
   lengths and constructed strings are not supported.
 - `--get` on DER can't descend into a protobuf string or vice versa.
 
 ## Roadmap
 
-1. CBOR and MessagePack
+1. MessagePack (reusing the shared `Value` tree)
 2. `cargo-fuzz` targets for every parser (round-trip property tests exist)
 3. Re-encoding: `bytepeel set 1.3=42` rewrites a field and re-serializes
 4. WASM build of `bytepeel-core` → npm package

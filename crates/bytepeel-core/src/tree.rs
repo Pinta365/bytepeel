@@ -3,7 +3,8 @@
 use std::fmt::Write as _;
 
 use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node};
-use crate::{der, varint};
+use crate::value::{Value, ValueKind};
+use crate::{der, value, varint};
 
 pub fn node_to_tree(n: &Node) -> String {
     let mut o = String::new();
@@ -21,6 +22,92 @@ pub fn asn1_to_tree(e: &Asn1) -> String {
     let mut o = String::new();
     asn1(&mut o, e, 0);
     o
+}
+
+pub fn value_to_tree(v: &Value) -> String {
+    let mut o = String::new();
+    value(&mut o, v, 0);
+    o
+}
+
+fn value(o: &mut String, v: &Value, d: usize) {
+    indent(o, d);
+    let ind = if v.indefinite { " (indefinite)" } else { "" };
+    let _ = write!(
+        o,
+        "{} [{}..{}]{ind}",
+        value::type_name(&v.kind),
+        v.range[0],
+        v.range[1]
+    );
+    match &v.kind {
+        ValueKind::Uint(n) => {
+            let _ = writeln!(o, " {n}");
+        }
+        ValueKind::Nint(n) => {
+            let _ = writeln!(o, " {}", -(*n as i128) - 1);
+        }
+        ValueKind::Float { value: x, width } => {
+            let _ = writeln!(o, " {x} width={width}");
+        }
+        ValueKind::Bool(b) => {
+            let _ = writeln!(o, " {b}");
+        }
+        ValueKind::Null | ValueKind::Undefined => o.push('\n'),
+        ValueKind::Simple(n) => {
+            let _ = writeln!(o, " {n}");
+        }
+        ValueKind::Bytes { data, decoded } => {
+            let _ = write!(o, " len={} ", data.len());
+            hex_preview(o, data);
+            o.push('\n');
+            if let Some(n) = decoded {
+                node(o, n, d + 1);
+            }
+        }
+        ValueKind::Text(t) => {
+            o.push(' ');
+            quote(o, t, 80);
+            o.push('\n');
+        }
+        ValueKind::Array(items) => {
+            o.push('\n');
+            for item in items {
+                value(o, item, d + 1);
+            }
+        }
+        ValueKind::Map(entries) => {
+            o.push('\n');
+            // Each entry: the key at d+1, then its value one deeper.
+            for (k, val) in entries {
+                value(o, k, d + 1);
+                value(o, val, d + 2);
+            }
+        }
+        ValueKind::Tag(n, inner) => {
+            let _ = write!(o, " {n}");
+            if let Some(name) = value::tag_name(*n) {
+                let _ = write!(o, " ({name})");
+            }
+            if *n == 1 {
+                if let Some(iso) = value::epoch_iso(inner) {
+                    let _ = write!(o, " iso={iso}");
+                }
+            } else if *n == 2 || *n == 3 {
+                if let ValueKind::Bytes { data, .. } = &inner.kind {
+                    let _ = write!(o, " int={}", value::bignum_decimal(data, *n == 3));
+                }
+            } else if *n == 37 {
+                if let ValueKind::Bytes { data, .. } = &inner.kind {
+                    if data.len() == 16 {
+                        let _ = write!(o, " uuid={}", value::uuid_string(data));
+                    }
+                }
+            }
+            o.push('\n');
+            value(o, inner, d + 1);
+        }
+    }
 }
 
 fn indent(o: &mut String, d: usize) {
@@ -89,6 +176,12 @@ fn node(o: &mut String, n: &Node, d: usize) {
             o.push('\n');
             for e in items {
                 asn1(o, e, d + 1);
+            }
+        }
+        Detail::Values { items } => {
+            o.push('\n');
+            for v in items {
+                value(o, v, d + 1);
             }
         }
         Detail::Parts { parts, times } => {

@@ -2,6 +2,7 @@
 
 use crate::Diag;
 use crate::node::{AltKind, Asn1, Codec, Detail, Field, FieldValue, Node};
+use crate::value::{Value, ValueKind};
 
 /// Select a protobuf field by path.
 ///
@@ -168,6 +169,124 @@ pub fn select_der<'a>(root: &'a Node, path: &str) -> Result<&'a Asn1, Diag> {
         })?);
     }
     Ok(cur.expect("path has at least one segment"))
+}
+
+/// Select a CBOR value by path.
+///
+/// Each segment is a map key or an array index (`users.0.name`). A segment
+/// matches a text key exactly; a numeric segment indexes an array, or matches
+/// an integer map key. If the top level has several items (a forced CBOR
+/// sequence), the first segment indexes them. Tags are followed transparently.
+pub fn select_value<'a>(root: &'a Node, path: &str) -> Result<&'a Value, Diag> {
+    let segs = parse_value_path(path)?;
+    let items = values_items(root)
+        .ok_or_else(|| Diag::new("PATH_NOT_MESSAGE", "the input did not decode to CBOR", None))?;
+    let (mut cur, start) = if items.len() == 1 {
+        (&items[0], 0)
+    } else {
+        let idx: usize = segs[0].parse().map_err(|_| {
+            Diag::new(
+                "PATH_NOT_FOUND",
+                format!("'{}' is not an index into the CBOR sequence", segs[0]),
+                None,
+            )
+        })?;
+        let v = items.get(idx).ok_or_else(|| {
+            Diag::new("PATH_NOT_FOUND", format!("no element '{}'", segs[0]), None)
+        })?;
+        (v, 1)
+    };
+    for (i, seg) in segs.iter().enumerate().skip(start) {
+        let v = cur.untagged();
+        cur = match &v.kind {
+            ValueKind::Map(entries) => map_lookup(entries, seg).ok_or_else(|| {
+                Diag::new(
+                    "PATH_NOT_FOUND",
+                    format!("no key '{}' at '{}'", seg, prefix_str(&segs, i)),
+                    None,
+                )
+            })?,
+            ValueKind::Array(arr) => {
+                let idx: usize = seg.parse().map_err(|_| {
+                    Diag::new(
+                        "PATH_NOT_FOUND",
+                        format!("'{}' is not an array index", seg),
+                        None,
+                    )
+                })?;
+                arr.get(idx).ok_or_else(|| {
+                    Diag::new(
+                        "PATH_NOT_FOUND",
+                        format!("no index '{idx}' at '{}'", prefix_str(&segs, i)),
+                        None,
+                    )
+                })?
+            }
+            _ => {
+                return Err(Diag::new(
+                    "PATH_NOT_MESSAGE",
+                    format!("'{}' is not a map or array", prefix_str(&segs, i)),
+                    None,
+                ));
+            }
+        };
+    }
+    Ok(cur)
+}
+
+fn map_lookup<'a>(entries: &'a [(Value, Value)], seg: &str) -> Option<&'a Value> {
+    for (k, v) in entries {
+        if let ValueKind::Text(t) = &k.untagged().kind {
+            if t == seg {
+                return Some(v);
+            }
+        }
+    }
+    if let Ok(want) = seg.parse::<i128>() {
+        for (k, v) in entries {
+            let key = match &k.untagged().kind {
+                ValueKind::Uint(n) => Some(*n as i128),
+                ValueKind::Nint(n) => Some(-(*n as i128) - 1),
+                _ => None,
+            };
+            if key == Some(want) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn prefix_str(segs: &[&str], n: usize) -> String {
+    segs[..n].join(".")
+}
+
+fn parse_value_path(p: &str) -> Result<Vec<&str>, Diag> {
+    if p.trim().is_empty() {
+        return Err(Diag::new("BAD_PATH", "empty path", None));
+    }
+    let segs: Vec<&str> = p.split('.').collect();
+    if segs.iter().any(|s| s.is_empty()) {
+        return Err(Diag::new(
+            "BAD_PATH",
+            "CBOR paths do not allow empty segments",
+            None,
+        ));
+    }
+    Ok(segs)
+}
+
+/// True when `node` (after any text layers) is CBOR.
+pub fn is_values(node: &Node) -> bool {
+    values_items(node).is_some()
+}
+
+fn values_items(node: &Node) -> Option<&[Value]> {
+    match &node.detail {
+        Detail::Values { items } => Some(items),
+        Detail::Layer { child, .. } => values_items(child),
+        _ => None,
+    }
 }
 
 /// True when `node` (after any text layers) is DER, so paths are element

@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 
 use crate::node::{Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node};
+use crate::value::{self, Value, ValueKind};
 use crate::{Diag, der, text, varint};
 
 const TEXT_CAP: usize = 1024;
@@ -35,6 +36,105 @@ pub fn diag_to_json(d: &Diag) -> String {
     diag(&mut o, d);
     o.push('}');
     o
+}
+
+pub fn value_to_json(v: &Value) -> String {
+    let mut o = String::new();
+    value(&mut o, v);
+    o
+}
+
+fn values_arr(o: &mut String, items: &[Value]) {
+    o.push('[');
+    for (i, v) in items.iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        value(o, v);
+    }
+    o.push(']');
+}
+
+fn value(o: &mut String, v: &Value) {
+    let _ = write!(
+        o,
+        "{{\"type\":\"{}\",\"range\":[{},{}]",
+        value::type_name(&v.kind),
+        v.range[0],
+        v.range[1]
+    );
+    if v.indefinite {
+        o.push_str(",\"indefinite\":true");
+    }
+    match &v.kind {
+        ValueKind::Uint(n) => {
+            let _ = write!(o, ",\"value\":\"{n}\"");
+        }
+        ValueKind::Nint(n) => {
+            let _ = write!(o, ",\"value\":\"{}\"", -(*n as i128) - 1);
+        }
+        ValueKind::Float { value: x, width } => {
+            let _ = write!(o, ",\"value\":{},\"width\":{width}", fmt_f64(*x));
+        }
+        ValueKind::Bool(b) => {
+            let _ = write!(o, ",\"value\":{b}");
+        }
+        ValueKind::Null | ValueKind::Undefined => {}
+        ValueKind::Simple(n) => {
+            let _ = write!(o, ",\"value\":{n}");
+        }
+        ValueKind::Bytes { data, decoded } => {
+            let _ = write!(o, ",\"len\":{}", data.len());
+            hex_kv(o, data);
+            if let Some(n) = decoded {
+                o.push_str(",\"decoded\":");
+                node(o, n);
+            }
+        }
+        ValueKind::Text(t) => text_kv(o, "value", t),
+        ValueKind::Array(items) => {
+            o.push_str(",\"items\":");
+            values_arr(o, items);
+        }
+        ValueKind::Map(entries) => {
+            o.push_str(",\"entries\":[");
+            for (i, (k, val)) in entries.iter().enumerate() {
+                if i > 0 {
+                    o.push(',');
+                }
+                o.push_str("{\"key\":");
+                value(o, k);
+                o.push_str(",\"value\":");
+                value(o, val);
+                o.push('}');
+            }
+            o.push(']');
+        }
+        ValueKind::Tag(n, inner) => {
+            let _ = write!(o, ",\"tag\":\"{n}\"");
+            if let Some(name) = value::tag_name(*n) {
+                let _ = write!(o, ",\"name\":\"{name}\"");
+            }
+            if *n == 1 {
+                if let Some(iso) = value::epoch_iso(inner) {
+                    let _ = write!(o, ",\"iso\":\"{iso}\"");
+                }
+            } else if *n == 2 || *n == 3 {
+                if let ValueKind::Bytes { data, .. } = &inner.kind {
+                    let _ = write!(o, ",\"int\":\"{}\"", value::bignum_decimal(data, *n == 3));
+                }
+            } else if *n == 37 {
+                if let ValueKind::Bytes { data, .. } = &inner.kind {
+                    if data.len() == 16 {
+                        let _ = write!(o, ",\"uuid\":\"{}\"", value::uuid_string(data));
+                    }
+                }
+            }
+            o.push_str(",\"value\":");
+            value(o, inner);
+        }
+    }
+    o.push('}');
 }
 
 fn esc(o: &mut String, s: &str) {
@@ -172,6 +272,10 @@ fn node(o: &mut String, n: &Node) {
         Detail::Der { items } => {
             o.push_str(",\"items\":");
             asn1_arr(o, items);
+        }
+        Detail::Values { items } => {
+            o.push_str(",\"items\":");
+            values_arr(o, items);
         }
         Detail::Parts { parts, times } => {
             o.push_str(",\"parts\":[");

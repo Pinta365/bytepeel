@@ -6,6 +6,7 @@
 //! buffer at that string's bytes.
 
 use crate::Diag;
+use crate::value::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alphabet {
@@ -50,6 +51,8 @@ pub enum Codec {
     Zstd,
     Protobuf,
     Der,
+    /// CBOR (RFC 8949): a sequence of one or more [`Value`]s.
+    Cbor,
     Utf8,
     Bytes,
 }
@@ -68,6 +71,7 @@ impl Codec {
             Codec::Zstd => "zstd",
             Codec::Protobuf => "protobuf",
             Codec::Der => "der",
+            Codec::Cbor => "cbor",
             Codec::Utf8 => "utf8",
             Codec::Bytes => "bytes",
         }
@@ -92,6 +96,9 @@ pub enum Detail {
     Message { fields: Vec<Field> },
     /// DER-encoded ASN.1: one or more top-level elements.
     Der { items: Vec<Asn1> },
+    /// CBOR: normally one top-level value; a sequence may have several when
+    /// forced with `--as cbor`.
+    Values { items: Vec<Value> },
     /// A JWT or a PEM bundle: one node per part (base64 segments, or PEM
     /// blocks). `times` is `Detail::Parts`' only JWT-specific field: the
     /// top-level time claims of a JWS payload (`exp`, `nbf`, `iat`), in that

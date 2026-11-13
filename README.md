@@ -35,6 +35,7 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 | JWT | JWS (3 parts) and JWE (5 parts); each part decoded, and `exp`/`nbf`/`iat` rendered as ISO-8601 UTC |
 | protobuf | schemaless; groups, negative varints, fixed32/64 as int and float |
 | DER / ASN.1 | X.509, PKCS, CMS; ~85 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
+| CBOR | RFC 8949: maps, arrays, tags (epoch → ISO-8601, bignums, uuid), indefinite lengths, half/single/double floats; `--as cbor` for scalars |
 | utf8 / bytes | leaves |
 | gzip, zlib, zstd | checksum-verified, multi-member/frame, 64 MiB output cap (optional core features `deflate` and `zstd`, on in the CLI) |
 | PNG, zip | recognized by magic bytes; decoders on the roadmap |
@@ -45,12 +46,13 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
 
 --in <auto|hex|base64|raw>           how to read the input (default: auto)
---as <protobuf|der|text|bytes>       force interpretation of the decoded bytes
+--as <protobuf|der|cbor|text|bytes>  force interpretation of the decoded bytes
 --depth <N>                          max nesting (default 16)
 --alts <N>                           interpretations kept per LEN field (default 3)
 --get <PATH>                         protobuf: field numbers, e.g. 1.3[2].4
                                      DER: 0-based child indices, e.g. 0.0.6
                                      PEM bundle: first index picks the block, e.g. 1.0.0.5
+                                     CBOR: map keys / array indices, e.g. users.0.name
 --format <json|tree|raw>             raw writes a --get selection's payload bytes
 ```
 
@@ -67,6 +69,9 @@ $ bytepeel cert.pem --get 0.0.4 --format tree        # X.509 validity
 SEQUENCE [124..156]
   UTCTime [126..141] 2020-09-04T00:00:00Z
   UTCTime [141..156] 2040-09-17T16:00:00Z
+
+$ bytepeel record.cbor --get tags.1 --format raw     # a CBOR map value
+b
 ```
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,
