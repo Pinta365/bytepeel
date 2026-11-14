@@ -24,6 +24,18 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 - **Zero-dependency core** (`bytepeel-core`; gzip/zstd are opt-in features)
   and a single static binary.
 
+## Install
+
+```sh
+cargo install bytepeel             # the CLI and MCP server (Rust 1.87+)
+```
+
+Prebuilt binaries for Linux (static), macOS and Windows are attached to each
+[GitHub release](https://github.com/pinta365/bytepeel/releases). For
+JavaScript, use `npm install bytepeel` or `deno add jsr:@pinta365/bytepeel`
+(see [npm/README.md](npm/README.md)), and for Rust, the
+[`bytepeel-core`](https://crates.io/crates/bytepeel-core) crate.
+
 ## Supported today
 
 | Layer | Notes |

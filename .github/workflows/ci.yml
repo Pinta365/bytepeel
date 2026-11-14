@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p bytepeel-wasm --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo test -p bytepeel-core --no-default-features
+      - run: cargo test -p bytepeel-core --no-default-features --features deflate
+      - run: cargo test -p bytepeel-core --no-default-features --features zstd
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: JavaScript package
+        working-directory: npm
+        run: |
+          npm run build
+          npm test
+          deno test --allow-read test/
+          deno publish --dry-run --allow-dirty
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - run: cargo test --workspace
+
+  other-platforms:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace

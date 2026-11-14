@@ -1,11 +1,13 @@
 [package]
 name = "bytepeel-core"
-description = "Zero-dependency recursive decoder for encoded and binary data (hex, base64, PEM, JWT, schemaless protobuf, DER/ASN.1) with confidence-ranked interpretations"
-keywords = ["protobuf", "asn1", "base64", "decoder", "jwt"]
+description = "Zero-dependency recursive decoder and editor for encoded and binary data: hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and schemaless protobuf, with confidence-ranked interpretations"
+keywords = ["protobuf", "asn1", "cbor", "decoder", "jwt"]
 categories = ["encoding", "parser-implementations"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 
@@ -17,7 +19,7 @@ ruzstd = { version = "0.8.2", optional = true }
 
 [features]
 default = []
-# gzip, zlib and raw DEFLATE layers.
+# gzip and zlib layers.
 deflate = ["dep:miniz_oxide"]
 # Zstandard layers.
 zstd = ["dep:ruzstd"]

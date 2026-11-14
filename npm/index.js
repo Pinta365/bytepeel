@@ -1,3 +1,4 @@
+// @ts-self-types="./index.d.ts"
 // bytepeel for JavaScript: a thin wrapper over bytepeel.wasm (Node, Deno,
 // Bun, browsers). See README.md. The JSON schema is docs/DESIGN.md.
 

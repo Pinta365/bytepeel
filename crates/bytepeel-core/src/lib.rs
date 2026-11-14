@@ -16,6 +16,11 @@
 //! ```
 #![forbid(unsafe_code)]
 
+/// The README's examples, run as doctests.
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;
+
 mod cbor;
 mod compress;
 mod der;

@@ -310,7 +310,7 @@ fn oid(c: &[u8], relative: bool) -> Option<String> {
 }
 
 fn utf16be(c: &[u8]) -> Option<String> {
-    if c.len() % 2 != 0 {
+    if !c.len().is_multiple_of(2) {
         return None;
     }
     let units = c.chunks(2).map(|p| u16::from_be_bytes([p[0], p[1]]));
@@ -320,7 +320,7 @@ fn utf16be(c: &[u8]) -> Option<String> {
 }
 
 fn utf32be(c: &[u8]) -> Option<String> {
-    if c.len() % 4 != 0 {
+    if !c.len().is_multiple_of(4) {
         return None;
     }
     c.chunks(4)

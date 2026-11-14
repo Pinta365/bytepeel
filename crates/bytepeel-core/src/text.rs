@@ -77,7 +77,7 @@ pub(crate) fn hex_scan(s: &str) -> Result<(Vec<u8>, HexInfo), Diag> {
         if tok.is_empty() {
             continue;
         }
-        if tok.len() % 2 != 0 {
+        if !tok.len().is_multiple_of(2) {
             return Err(Diag::new(
                 "ODD_LENGTH",
                 "hex token has an odd number of digits",
@@ -250,7 +250,7 @@ pub fn decode_b64(s: &str) -> Result<B64, Diag> {
         } else {
             Alphabet::Std
         },
-        padded: pad > 0 || n % 4 == 0,
+        padded: pad > 0 || n.is_multiple_of(4),
         bytes: out,
         noncanonical,
     })

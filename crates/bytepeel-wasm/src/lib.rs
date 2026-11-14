@@ -75,7 +75,7 @@ pub fn parse_opts(s: &str) -> Result<Options, Diag> {
 /// (`set`/`add` take a value in the CLI syntax; `del` takes an empty one).
 pub fn parse_ops(arg: &str) -> Result<Vec<Op>, Diag> {
     let parts: Vec<&str> = arg.split('\0').collect();
-    if parts.len() % 3 != 0 || parts.is_empty() || arg.is_empty() {
+    if !parts.len().is_multiple_of(3) || parts.is_empty() || arg.is_empty() {
         return Err(bad("edits must be (kind, path, value) triples"));
     }
     parts

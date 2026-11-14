@@ -1,0 +1,19 @@
+{
+  "name": "@pinta365/bytepeel",
+  "version": "0.1.0",
+  "license": "MIT",
+  "exports": "./mod.js",
+  "nodeModulesDir": "none",
+  "publish": {
+    "include": [
+      "mod.js",
+      "mod.d.ts",
+      "index.js",
+      "index.d.ts",
+      "bytepeel_wasm.js",
+      "bytepeel_wasm.d.ts",
+      "README.md",
+      "LICENSE"
+    ]
+  }
+}

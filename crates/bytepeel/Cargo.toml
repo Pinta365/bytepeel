@@ -1,11 +1,13 @@
 [package]
 name = "bytepeel"
-description = "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1) with JSON output built for AI agents"
-keywords = ["protobuf", "base64", "decoder", "binary", "cli"]
-categories = ["command-line-utilities", "encoding"]
+description = "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, DER/ASN.1, CBOR, MessagePack, protobuf), edit it in place, and serve it to AI agents over MCP"
+keywords = ["protobuf", "decoder", "cli", "mcp", "asn1"]
+categories = ["command-line-utilities", "encoding", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+readme = "../../README.md"
 repository.workspace = true
 rust-version.workspace = true
 

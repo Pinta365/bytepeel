@@ -7,6 +7,13 @@ gzip/zlib/zstd, DER/ASN.1, CBOR, MessagePack and schemaless protobuf.
 One `bytepeel.wasm` with no imports and no JS dependencies; runs in Node
 (≥18), Deno, Bun and browsers.
 
+```sh
+npm install bytepeel              # npm (Node, Bun, bundlers)
+deno add jsr:@pinta365/bytepeel   # JSR (Deno; also npx jsr add for Node)
+```
+
+The JSR package imports from `"@pinta365/bytepeel"` and has the same API.
+
 ```js
 import { load, raw, BytepeelError } from "bytepeel";
 
@@ -37,17 +44,20 @@ new TextDecoder().decode(out);                  // "08 96 01 18 2a"
   lose precision.
 - **Errors** throw `BytepeelError` with the CLI's stable `code` (e.g.
   `PATH_NOT_FOUND`) and `offset`.
-- **Loading:** `load()` reads `bytepeel.wasm` next to `index.js` (file read
-  in Node/Deno/Bun, `fetch` over HTTP). Pass the bytes, a URL, a
-  `Response`, or a compiled `WebAssembly.Module` to load it yourself.
+- **Loading:** from npm, `load()` reads `bytepeel.wasm` next to `index.js`
+  (a file read in Node/Deno/Bun, `fetch` over HTTP). The JSR package embeds
+  the module, so `load()` needs no file or network access (no Deno
+  permissions). Pass the bytes, a URL, a `Response`, or a compiled
+  `WebAssembly.Module` to load it yourself.
 
 The JSON schema, paths and edit rules are in
-[docs/DESIGN.md](../docs/DESIGN.md).
+[docs/DESIGN.md](https://github.com/pinta365/bytepeel/blob/main/docs/DESIGN.md).
 
 ## Building
 
 ```sh
 rustup target add wasm32-unknown-unknown
-npm run build      # cargo build --profile wasm ... and copies bytepeel.wasm here
+npm run build      # cargo build --profile wasm ...; copies bytepeel.wasm here and
+                   # writes bytepeel_wasm.js (the module as base64, for JSR)
 npm test           # node --test; also: deno test --allow-read test/, bun test test/
 ```

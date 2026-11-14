@@ -4,6 +4,13 @@
   "description": "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1, CBOR, MessagePack) and edit it in place. WebAssembly, no dependencies.",
   "license": "MIT",
   "author": "Pinta365",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pinta365/bytepeel.git",
+    "directory": "npm"
+  },
+  "homepage": "https://github.com/pinta365/bytepeel#readme",
+  "bugs": "https://github.com/pinta365/bytepeel/issues",
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
@@ -14,13 +21,31 @@
     },
     "./bytepeel.wasm": "./bytepeel.wasm"
   },
-  "files": ["index.js", "index.d.ts", "bytepeel.wasm", "README.md", "LICENSE"],
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bytepeel.wasm",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "private": true,
   "scripts": {
     "build": "sh build.sh",
     "test": "node --test test/"
   },
-  "keywords": ["protobuf", "asn1", "der", "cbor", "msgpack", "base64", "jwt", "decoder", "wasm"]
+  "keywords": [
+    "protobuf",
+    "asn1",
+    "der",
+    "cbor",
+    "msgpack",
+    "base64",
+    "jwt",
+    "decoder",
+    "wasm"
+  ]
 }

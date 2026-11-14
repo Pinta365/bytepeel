@@ -354,7 +354,7 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             score: if pr < 0.5 { 0.25 } else { 0.03 },
         });
     }
-    if data.len() % 8 == 0 {
+    if data.len().is_multiple_of(8) {
         let values: Vec<u64> = data
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -365,7 +365,7 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             score: fixed_score(0.3, p, pr),
         });
     }
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         let values: Vec<u32> = data
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
