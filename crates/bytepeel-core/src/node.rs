@@ -215,7 +215,11 @@ pub enum AltKind {
     PackedFixed32(Vec<u32>),
     /// Little-endian 8-byte values (packed `fixed64` / `sfixed64` / `double`).
     PackedFixed64(Vec<u64>),
-    Bytes,
+    Bytes {
+        /// Set when the raw bytes are themselves another format (compressed,
+        /// DER, CBOR/MessagePack); see `docs/DESIGN.md` for the threshold.
+        decoded: Option<Box<Node>>,
+    },
     Empty,
 }
 
@@ -227,7 +231,7 @@ impl AltKind {
             AltKind::PackedVarint(_) => "packed_varint",
             AltKind::PackedFixed32(_) => "packed_fixed32",
             AltKind::PackedFixed64(_) => "packed_fixed64",
-            AltKind::Bytes => "bytes",
+            AltKind::Bytes { .. } => "bytes",
             AltKind::Empty => "empty",
         }
     }

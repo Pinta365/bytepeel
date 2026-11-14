@@ -377,7 +377,7 @@ pub fn is_jwt(node: &Node) -> bool {
     jwt_parts(node).is_some()
 }
 
-fn jwt_parts(node: &Node) -> Option<(&'static [&'static str], &[Node])> {
+pub(crate) fn jwt_parts(node: &Node) -> Option<(&'static [&'static str], &[Node])> {
     match &node.detail {
         Detail::Parts { parts, .. } => match node.codec {
             Codec::Jwt { kind: "jws" } => Some((&JWS_PARTS[..], parts)),

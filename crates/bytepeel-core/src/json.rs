@@ -461,7 +461,13 @@ fn alt(o: &mut String, a: &Alt, data: &[u8]) {
                 o.push_str(",\"truncated\":true");
             }
         }
-        AltKind::Bytes => hex_kv(o, data),
+        AltKind::Bytes { decoded } => {
+            hex_kv(o, data);
+            if let Some(n) = decoded {
+                o.push_str(",\"decoded\":");
+                node(o, n);
+            }
+        }
         AltKind::Empty => {}
     }
     o.push('}');

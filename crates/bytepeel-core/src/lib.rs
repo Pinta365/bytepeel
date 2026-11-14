@@ -24,6 +24,7 @@ mod dump;
 mod edit;
 mod encode_value;
 mod error;
+mod get;
 mod json;
 mod jsonpath;
 mod jwt;
@@ -40,6 +41,7 @@ pub mod varint;
 
 pub use edit::{NewValue, Op, edit, parse_value, set};
 pub use error::Diag;
+pub use get::{Pick, get};
 pub use node::{
     Alphabet, Alt, AltKind, Asn1, Asn1Value, BYTES_HEAD, Codec, Detail, Field, FieldValue, Node,
     TEXT_HEAD, TagClass,

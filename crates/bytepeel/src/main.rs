@@ -28,7 +28,9 @@ OPTIONS:
     --get <PATH>                   Select one protobuf field (field numbers, e.g. 1.3[2].4),
                                    DER element (child indices, e.g. 0.0.6), or CBOR/MessagePack
                                    value (map keys / array indices, e.g. users.0.name), or JWT
-                                   part and JSON claim (e.g. payload, payload.sub, header.alg)
+                                   part and JSON claim (e.g. payload, payload.sub, header.alg).
+                                   Paths cross formats: 2.0.0.5 is the subject of a certificate
+                                   in protobuf field 2
     --format <json|tree|raw>       Output format (default: json; raw needs --get)
     -h, --help                     Print help
     -V, --version                  Print version
@@ -287,77 +289,17 @@ fn main() -> ExitCode {
 
     let mut out = io::stdout().lock();
     let res = match &args.get {
-        Some(path) if core::is_der(&node) => {
-            let e = match core::select_der(&node, path) {
-                Ok(e) => e,
-                Err(e) => return fail(&e, 1),
-            };
-            match args.format {
-                Format::Json => writeln!(out, "{}", core::asn1_to_json(e)),
-                Format::Tree => write!(out, "{}", core::asn1_to_tree(e)),
-                Format::Raw => match e.payload() {
-                    Some(b) => out.write_all(&b),
-                    None => {
-                        let e = Diag::new(
-                            "NO_PAYLOAD",
-                            "a constructed element has no single payload; use --format json",
-                            None,
-                        );
-                        return fail(&e, 1);
-                    }
-                },
-            }
-        }
-        Some(path) if core::is_values(&node) => {
-            let v = match core::select_value(&node, path) {
-                Ok(v) => v,
-                Err(e) => return fail(&e, 1),
-            };
-            match args.format {
-                Format::Json => writeln!(out, "{}", core::value_to_json(v)),
-                Format::Tree => write!(out, "{}", core::value_to_tree(v)),
-                Format::Raw => match v.payload() {
-                    Some(b) => out.write_all(&b),
-                    None => {
-                        let e = Diag::new(
-                            "NO_PAYLOAD",
-                            "this value has no single payload; use --format json",
-                            None,
-                        );
-                        return fail(&e, 1);
-                    }
-                },
-            }
-        }
-        Some(path) if core::is_jwt(&node) => {
-            let p = match core::select_jwt(&node, path) {
+        Some(path) => {
+            let p = match core::get(&node, path) {
                 Ok(p) => p,
                 Err(e) => return fail(&e, 1),
             };
             match args.format {
                 Format::Json => writeln!(out, "{}", p.to_json()),
                 Format::Tree => write!(out, "{}", p.to_tree()),
-                Format::Raw => out.write_all(&p.payload()),
-            }
-        }
-        Some(path) => {
-            let f = match core::select(&node, path) {
-                Ok(f) => f,
-                Err(e) => return fail(&e, 1),
-            };
-            match args.format {
-                Format::Json => writeln!(out, "{}", core::field_to_json(f)),
-                Format::Tree => write!(out, "{}", core::field_to_tree(f)),
-                Format::Raw => match f.payload() {
-                    Some(b) => out.write_all(&b),
-                    None => {
-                        let e = Diag::new(
-                            "NO_PAYLOAD",
-                            "a group has no single payload; use --format json",
-                            None,
-                        );
-                        return fail(&e, 1);
-                    }
+                Format::Raw => match p.payload() {
+                    Ok(b) => out.write_all(&b),
+                    Err(e) => return fail(&e, 1),
                 },
             }
         }

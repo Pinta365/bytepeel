@@ -38,6 +38,8 @@ test("get and getRaw dispatch by codec", () => {
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhXG5iIiwiZXhwIjoxfQ._wA";
   assert.equal(bp.get(jwt, "payload.sub").value, "a\nb");
   assert.equal(bp.get(jwt, "header").part, "header");
+  // One path across formats: protobuf inside a CBOR byte string.
+  assert.equal(bp.get("a1 61 70 45 0a 03 66 6f 6f", "p.1").alts[0].value, "foo");
   assert.equal(new TextDecoder().decode(bp.getRaw(jwt, "payload.sub")), "a\nb");
 });
 

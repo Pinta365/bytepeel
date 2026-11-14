@@ -106,41 +106,11 @@ pub fn call(op: u32, input: &[u8], arg: &[u8], opts: &[u8]) -> Result<Vec<u8>, D
             let node = core::peel(input, &opts)?;
             let path = text(arg, "path")?;
             let raw = op == OP_GET_RAW;
-            let none = |what: &str| {
-                Diag::new(
-                    "NO_PAYLOAD",
-                    format!("{what} has no single payload; use get()"),
-                    None,
-                )
-            };
-            if core::is_der(&node) {
-                let e = core::select_der(&node, &path)?;
-                if raw {
-                    e.payload().ok_or_else(|| none("a constructed element"))
-                } else {
-                    Ok(core::asn1_to_json(e).into_bytes())
-                }
-            } else if core::is_values(&node) {
-                let v = core::select_value(&node, &path)?;
-                if raw {
-                    v.payload().ok_or_else(|| none("this value"))
-                } else {
-                    Ok(core::value_to_json(v).into_bytes())
-                }
-            } else if core::is_jwt(&node) {
-                let p = core::select_jwt(&node, &path)?;
-                Ok(if raw {
-                    p.payload()
-                } else {
-                    p.to_json().into_bytes()
-                })
+            let p = core::get(&node, &path)?;
+            if raw {
+                p.payload()
             } else {
-                let f = core::select(&node, &path)?;
-                if raw {
-                    f.payload().ok_or_else(|| none("a group"))
-                } else {
-                    Ok(core::field_to_json(f).into_bytes())
-                }
+                Ok(p.to_json().into_bytes())
             }
         }
         OP_EDIT => {
@@ -247,6 +217,11 @@ mod tests {
         let d = String::from_utf8(ok(OP_GET, b"30 03 02 01 05", "0.0", "")).unwrap();
         assert!(d.contains(r#""int":"5""#), "{d}");
         assert_eq!(ok(OP_GET_RAW, b"a1 61 61 63 78 79 7a", "a", ""), b"xyz");
+        // A path that crosses from CBOR into protobuf.
+        assert_eq!(
+            ok(OP_GET_RAW, b"a1 61 70 45 0a 03 66 6f 6f", "p.1", ""),
+            b"foo"
+        );
         // JWT parts and JSON claims.
         let jwt = b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhXG5iIiwiZXhwIjoxfQ._wA";
         assert_eq!(ok(OP_GET_RAW, jwt, "payload.sub", ""), b"a\nb");

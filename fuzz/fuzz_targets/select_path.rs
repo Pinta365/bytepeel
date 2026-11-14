@@ -1,10 +1,10 @@
-//! `--get` paths: input and path are split at the first NUL byte. Selection
-//! dispatches like the CLI: DER, then CBOR/MessagePack, then JWT, then protobuf.
+//! `--get` paths: input and path are split at the first NUL byte. Uses the
+//! cross-format `get` (what the CLI and WASM call), then each single-format
+//! selector the input supports.
 #![no_main]
 
 use bytepeel_core::{
-    Options, asn1_to_json, asn1_to_tree, field_to_json, field_to_tree, is_der, is_jwt, is_values,
-    peel, select, select_der, select_jwt, select_value, value_to_json, value_to_tree,
+    Options, get, is_der, is_jwt, is_values, peel, select, select_der, select_jwt, select_value,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -16,19 +16,17 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let node = peel(&data[nul + 1..], &Options::default()).unwrap();
-    if is_der(&node) {
-        if let Ok(e) = select_der(&node, path) {
-            let _ = (asn1_to_json(e), asn1_to_tree(e), e.payload());
-        }
-    } else if is_values(&node) {
-        if let Ok(v) = select_value(&node, path) {
-            let _ = (value_to_json(v), value_to_tree(v), v.payload());
-        }
-    } else if is_jwt(&node) {
-        if let Ok(p) = select_jwt(&node, path) {
-            let _ = (p.to_json(), p.to_tree(), p.payload());
-        }
-    } else if let Ok(f) = select(&node, path) {
-        let _ = (field_to_json(f), field_to_tree(f), f.payload());
+    if let Ok(p) = get(&node, path) {
+        let _ = (p.to_json(), p.to_tree(), p.payload());
     }
+    if is_der(&node) {
+        let _ = select_der(&node, path);
+    }
+    if is_values(&node) {
+        let _ = select_value(&node, path);
+    }
+    if is_jwt(&node) {
+        let _ = select_jwt(&node, path);
+    }
+    let _ = select(&node, path);
 });

@@ -118,7 +118,7 @@ Without a feature, a stream it would decode is a `bytes` leaf with an
 { "as": "packed_varint", "score": 0.31, "values": ["8", "150"] }
 { "as": "packed_fixed32", "score": 0.94, "values": [1069547520], "floats": [1.5] }
 { "as": "packed_fixed64", "score": 0.87, "values": ["4632445839417212613"], "doubles": [51.5074] }
-{ "as": "bytes", "score": 0.02, "hex": "..." }
+{ "as": "bytes", "score": 0.02, "hex": "...", "decoded": Node? }  // decoded: raw bytes are another format
 { "as": "empty", "score": 1.0 }
 ```
 
@@ -260,7 +260,8 @@ A `range` points into the buffer the node or field was parsed from:
 - A layer node's child is parsed from that layer's decoded bytes.
 - Protobuf fields at any nesting depth use offsets into the same message
   buffer, so nested fields have absolute offsets within it.
-- A string alt's `decoded` node starts a new buffer at that string's bytes.
+- A string or bytes alt's `decoded` node starts a new buffer at the field's
+  bytes.
 - A JWT part's `child` starts a new buffer at that part's decoded bytes.
 - A PEM bundle part's `range` is its block in the input text, and its `child`
   starts a new buffer at the block's decoded bytes.
@@ -304,6 +305,18 @@ A `range` points into the buffer the node or field was parsed from:
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
+- **Paths cross formats.** When the next segment cannot descend in the
+  current format but the item holds a decoded node, the rest of the path
+  continues in that node's format: a protobuf string or bytes alt's
+  `decoded` node, a CBOR/MessagePack byte string's `decoded` node, or a JWT
+  part that is not JSON. So `2.0.0.5` is the subject of a base64 (or raw DER,
+  or PEM) certificate in protobuf field 2, `cert.0.0.5` the same in a CBOR
+  map, `3.payload.sub` a claim of a JWT in a string field, and `p.1` a field
+  of protobuf in a byte string. Descent within a format always wins, so a
+  single-format path keeps its meaning. The result is printed in the
+  selected item's own schema (Field, Element, Value or the JWT form), with
+  ranges in the buffer of the node it was found in. `bytepeel set` paths do
+  not cross formats.
 
 ## Re-encoding (`bytepeel set`)
 
@@ -469,6 +482,7 @@ with typed edit values (strings are text, numbers are numbers) and
 | LEN alt: packed_varint | 0.25 if mostly non-printable, else 0.03 |
 | LEN alt: packed_fixed64 / packed_fixed32 | offered when the length is a multiple of 8 / 4: 0.3 / 0.28 × p⁴ + 0.01 if mostly non-printable (p = share of values that read as a plausible float: 0, or finite with magnitude in [1e-9, 1e12]), else 0.01. Two floats can also read as one plausible double, so both alts may appear |
 | LEN alt: bytes | always present at 0.02 |
+| LEN alt: bytes, decoded | after a message wins, a LEN field whose best alt is bytes or packed numbers gets nested detection; a non-protobuf result with confidence ≥ 0.8 (compressed, DER, CBOR/MessagePack with map keys) becomes the bytes alt's `decoded`, weighted 4 × its confidence against the already-normalized alts, then all are renormalized. Messages and strings are not re-detected (that would double the cost per level) |
 
 Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
@@ -538,7 +552,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   `--as cbor` / `--as msgpack`. JSON floats print `-0.0` as `0`.
 - DER: only OIDs in a built-in table (~175) are named; BER indefinite
   lengths and constructed strings are not supported.
-- `--get` on DER can't descend into a protobuf string or vice versa.
+- `bytepeel set` paths do not cross formats (`--get` paths do).
 
 ## Roadmap
 

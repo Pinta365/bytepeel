@@ -228,3 +228,15 @@ fn max_items_limits_and_lifts() {
     assert_eq!(code, 1);
     assert!(err.contains("TOO_MANY_ITEMS"), "{err}");
 }
+
+#[test]
+fn get_crosses_formats() {
+    // {"p": h'0a03666f6f'}: protobuf inside a CBOR byte string.
+    let cbor = b"a1 61 70 45 0a 03 66 6f 6f";
+    let (code, out, _) = run(&["--get", "p.1", "--format", "raw"], cbor);
+    assert_eq!(code, 0);
+    assert_eq!(out, b"foo");
+    let (_, out, _) = run(&["--get", "p.1"], cbor);
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.starts_with(r#"{"field":1,"wire":"LEN""#), "{s}");
+}

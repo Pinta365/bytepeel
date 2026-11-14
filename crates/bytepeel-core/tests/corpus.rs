@@ -1921,6 +1921,142 @@ fn text_leaf_keeps_only_its_head() {
     assert!(!to_json(&n).contains("truncated"));
 }
 
+// ------------------------------------------------------------ cross-format --get
+
+fn isrg_der() -> Vec<u8> {
+    let body: String = ISRG_X2
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    decode_b64(&body).unwrap().bytes
+}
+
+/// A protobuf LEN field (numbers < 16, lengths < 16384).
+fn len_field(num: u8, data: &[u8]) -> Vec<u8> {
+    let mut o = vec![num << 3 | 2];
+    let mut n = data.len();
+    while n >= 0x80 {
+        o.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    o.push(n as u8);
+    o.extend_from_slice(data);
+    o
+}
+
+fn cbor_bytes(d: &[u8]) -> Vec<u8> {
+    let mut o = vec![0x59];
+    o.extend_from_slice(&(d.len() as u16).to_be_bytes());
+    o.extend_from_slice(d);
+    o
+}
+
+/// The selection's payload as text (a DER string element's content, a
+/// field's bytes, a JWT claim).
+fn get_str(n: &Node, path: &str) -> String {
+    match get(n, path) {
+        Ok(p) => String::from_utf8(p.payload().unwrap()).unwrap(),
+        Err(e) => panic!("{path}: {} {}", e.code, e.message),
+    }
+}
+
+#[test]
+fn get_crosses_from_protobuf_into_der_and_jwt() {
+    let b64 = b64(&isrg_der());
+    let token = jws(r#"{"alg":"HS256"}"#, r#"{"sub":"alice"}"#, b"sig!");
+    let mut m = len_field(1, b"hello");
+    m.extend(len_field(2, b64.as_bytes())); // base64 DER in a string
+    m.extend(len_field(3, token.as_bytes())); // a JWT in a string
+    m.extend(len_field(4, &isrg_der())); // raw DER in a bytes field
+    m.extend(len_field(5, ISRG_X2.as_bytes())); // a PEM block
+    let n = auto(&m);
+    assert_eq!(n.codec, Codec::Protobuf);
+    for root in ["2", "4", "5"] {
+        assert_eq!(get_str(&n, &format!("{root}.0.0.5.2.0.1")), "ISRG Root X2");
+    }
+    assert_eq!(get_str(&n, "3.payload.sub"), "alice");
+    assert!(matches!(get(&n, "3.header").unwrap(), Pick::Jwt(p) if p.part == "header"));
+    // Single-format paths keep their meaning.
+    assert!(matches!(get(&n, "1").unwrap(), Pick::Field(f) if f.number == 1));
+    let code = |p: &str| get(&n, p).unwrap_err();
+    assert_eq!(code("1.0").code, "PATH_NOT_MESSAGE");
+    let e = code("2.0.0.99");
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("PATH_NOT_FOUND", "no element '2.0.0.99'")
+    );
+    assert_eq!(code("3.payload.nope").code, "PATH_NOT_FOUND");
+    assert_eq!(code("2.x").code, "BAD_PATH");
+}
+
+#[test]
+fn raw_bytes_fields_are_detected() {
+    let mut m = len_field(1, b"name");
+    m.extend(len_field(2, &isrg_der()));
+    let n = auto(&m);
+    let alt = top_alt(&msg(&n)[1]);
+    match &alt.kind {
+        AltKind::Bytes { decoded: Some(d) } => assert_eq!(d.codec, Codec::Der),
+        k => panic!("{}", k.name()),
+    }
+    let j = field_to_json(&msg(&n)[1]);
+    assert!(
+        j.contains(r#""as":"bytes""#) && j.contains(r#""decoded":{"codec":"der""#),
+        "{j}"
+    );
+    // Random-looking bytes that are not a confident format stay plain bytes.
+    let n = auto(&len_field(2, &h("ff00ee11dd22cc33bb44aa5599668877")));
+    for f in msg(&n) {
+        if let FieldValue::Len { alts, .. } = &f.value {
+            assert!(
+                alts.iter()
+                    .all(|a| !matches!(a.kind, AltKind::Bytes { decoded: Some(_) }))
+            );
+        }
+    }
+}
+
+#[cfg(feature = "deflate")]
+#[test]
+fn compressed_bytes_field_outranks_packed_noise() {
+    // A gzip stream in a bytes field also parses as packed varints; the
+    // checksum-verified decode must win.
+    let gz = include_bytes!("fixtures/msg.bin.gz");
+    let mut m = len_field(1, b"name");
+    m.extend(len_field(4, gz));
+    let n = auto(&m);
+    let alt = top_alt(&msg(&n)[1]);
+    assert!(matches!(&alt.kind, AltKind::Bytes { decoded: Some(d) } if d.codec.name() == "gzip"));
+    assert!(alt.score > 0.6, "{}", alt.score);
+    assert!(get(&n, "4.1").is_ok());
+}
+
+#[test]
+fn get_crosses_from_cbor_and_jwt_into_other_formats() {
+    // {"cert": h'<DER>', "p": h'089601'}
+    let mut c = vec![0xa2, 0x64];
+    c.extend_from_slice(b"cert");
+    c.extend(cbor_bytes(&isrg_der()));
+    c.extend_from_slice(&[0x61, b'p', 0x43, 0x08, 0x96, 0x01]);
+    let n = auto(&c);
+    assert_eq!(n.codec, Codec::Cbor);
+    assert_eq!(get_str(&n, "cert.0.0.5.2.0.1"), "ISRG Root X2");
+    match get(&n, "p.1").unwrap() {
+        Pick::Field(f) => assert_eq!(varint_value(f), 150),
+        p => panic!("{p:?}"),
+    }
+    assert!(matches!(get(&n, "p").unwrap(), Pick::Value(_)));
+
+    // A JWS whose payload is protobuf, not JSON.
+    let token = format!(
+        "{}.{}.",
+        b64url(br#"{"alg":"none"}"#),
+        b64url(&h("0a03666f6f"))
+    );
+    let n = auto(token.as_bytes());
+    assert_eq!(get_str(&n, "payload.1"), "foo");
+}
+
 #[test]
 fn json_is_valid_and_deterministic() {
     let inputs: Vec<Vec<u8>> = vec![
@@ -1979,6 +2115,11 @@ fn json_is_valid_and_deterministic() {
         h("820100"),
         h("f98000"),
         packed_fixed_msg(),
+        {
+            let mut m = len_field(1, b"name");
+            m.extend(len_field(2, &isrg_der()));
+            m
+        },
         Vec::new(),
     ];
     for input in inputs {

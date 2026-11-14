@@ -247,7 +247,8 @@ fn parse_fields(
 pub(crate) fn enrich(fields: &mut [Field], depth: usize, opts: &Options) {
     for f in fields {
         match &mut f.value {
-            FieldValue::Len { alts, .. } => {
+            FieldValue::Len { data, alts, .. } => {
+                enrich_bytes(data, alts, depth, opts);
                 for a in alts {
                     match &mut a.kind {
                         AltKind::Message(sub) => enrich(sub, depth + 1, opts),
@@ -264,6 +265,48 @@ pub(crate) fn enrich(fields: &mut [Field], depth: usize, opts: &Options) {
         }
     }
 }
+
+/// Nested detection for a LEN field whose best reading is raw bytes or
+/// packed numbers: a confident non-protobuf format (compressed, DER,
+/// CBOR/MessagePack; confidence at least `BYTES_DECODED_MIN`) becomes the
+/// `bytes` alt's `decoded` node, weighted 4 × that confidence. Messages and
+/// strings are skipped: they are already parsed or text-detected, and a
+/// second detection would double the cost per level.
+fn enrich_bytes(data: &[u8], alts: &mut Vec<Alt>, depth: usize, opts: &Options) {
+    let Some(top) = alts.first() else { return };
+    if matches!(
+        top.kind,
+        AltKind::Message(_) | AltKind::String { .. } | AltKind::Empty
+    ) {
+        return;
+    }
+    let Some(n) = detect::nested_bytes(data, depth + 1, opts) else {
+        return;
+    };
+    if n.codec == crate::Codec::Protobuf || n.confidence < BYTES_DECODED_MIN {
+        return;
+    }
+    // The other alts are already normalized (they sum to 1); on the raw
+    // scale they were scored on, a decode this confident outweighs them about
+    // four to one.
+    let score = 4.0 * n.confidence;
+    alts.retain(|a| !matches!(a.kind, AltKind::Bytes { .. }));
+    alts.push(Alt {
+        kind: AltKind::Bytes {
+            decoded: Some(Box::new(n)),
+        },
+        score,
+    });
+    let total: f64 = alts.iter().map(|a| a.score).sum();
+    for a in alts.iter_mut() {
+        a.score /= total;
+    }
+    alts.sort_by(|a, b| b.score.total_cmp(&a.score));
+    alts.truncate(opts.alts.max(1));
+}
+
+/// Minimum confidence for a raw `bytes` field's nested format to be shown.
+const BYTES_DECODED_MIN: f64 = 0.8;
 
 fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) -> Vec<Alt> {
     let data = &buf[s..e];
@@ -334,7 +377,7 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
         });
     }
     alts.push(Alt {
-        kind: AltKind::Bytes,
+        kind: AltKind::Bytes { decoded: None },
         score: 0.02,
     });
 

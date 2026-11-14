@@ -295,7 +295,8 @@ fn field(o: &mut String, f: &Field, d: usize) {
                     }
                     AltKind::String {
                         decoded: Some(n), ..
-                    } => node(o, n, d + 1),
+                    }
+                    | AltKind::Bytes { decoded: Some(n) } => node(o, n, d + 1),
                     _ => {}
                 }
             }
