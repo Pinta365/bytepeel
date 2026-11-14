@@ -133,6 +133,7 @@ fn parse_fields(
     let mut st = Stats::default();
     while *pos < end {
         let tag_start = *pos;
+        crate::limits::charge(tag_start)?;
         let (tag, n, overlong) = read_varint(buf, *pos, end)?;
         st.overlong += usize::from(overlong);
         *pos += n;

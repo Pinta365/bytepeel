@@ -251,6 +251,7 @@ fn parse_one(buf: &[u8], pos: &mut usize, nest: usize) -> Result<Value, Diag> {
     if nest > MAX_NEST {
         return Err(too_deep(*pos));
     }
+    crate::limits::charge(*pos)?;
     let start = *pos;
     let b = read_u8(buf, pos, start)?;
     let kind = match b {

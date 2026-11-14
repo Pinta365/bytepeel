@@ -62,6 +62,9 @@ pub fn parse_opts(s: &str) -> Result<Options, Diag> {
             }
             "depth" => o.depth = v.parse().map_err(|_| bad(format!("bad depth '{v}'")))?,
             "alts" => o.alts = v.parse().map_err(|_| bad(format!("bad alts '{v}'")))?,
+            "max_items" => {
+                o.max_items = v.parse().map_err(|_| bad(format!("bad max_items '{v}'")))?
+            }
             _ => return Err(bad(format!("unknown option '{k}'"))),
         }
     }

@@ -24,6 +24,7 @@ OPTIONS:
     --as <protobuf|der|cbor|msgpack|text|bytes>  Force how the decoded bytes are interpreted
     --depth <N>                    Max nesting of layers and messages (default: 16)
     --alts <N>                     Max interpretations kept per LEN field (default: 3)
+    --max-items <N>                Max fields/values/elements decoded in total (default: 1000000)
     --get <PATH>                   Select one protobuf field (field numbers, e.g. 1.3[2].4),
                                    DER element (child indices, e.g. 0.0.6), or CBOR/MessagePack
                                    value (map keys / array indices, e.g. users.0.name), or JWT
@@ -142,6 +143,7 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
             }
             "--depth" => args.opts.depth = parse_num(&value()?, "--depth")?,
             "--alts" => args.opts.alts = parse_num(&value()?, "--alts")?,
+            "--max-items" => args.opts.max_items = parse_num(&value()?, "--max-items")?,
             "--get" => args.get = Some(value()?),
             "--del" => {
                 let p = value()?;

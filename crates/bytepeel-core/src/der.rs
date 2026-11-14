@@ -147,6 +147,7 @@ fn items(buf: &[u8], s: usize, e: usize, nest: usize, st: &mut Stats) -> Result<
     let mut out = Vec::new();
     let mut pos = s;
     while pos < e {
+        crate::limits::charge(pos)?;
         let h = header(buf, pos, e, st)?;
         let [cs, ce] = h.content;
         let (raw, value) = if h.constructed {

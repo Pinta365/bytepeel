@@ -318,7 +318,7 @@ fn base64_std_padded() {
             padded: true
         }
     );
-    assert!(matches!(&child(&n).detail, Detail::Text { text } if text == "Hello world"));
+    assert!(matches!(&child(&n).detail, Detail::Text { text, .. } if text == "Hello world"));
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn base64_protobuf_base64_text() {
         panic!("string field should decode further")
     };
     assert_eq!(d.codec.name(), "base64");
-    assert!(matches!(&child(d).detail, Detail::Text { text } if text == "Hello, world!!"));
+    assert!(matches!(&child(d).detail, Detail::Text { text, .. } if text == "Hello, world!!"));
     assert_eq!(varint_value(select(&n, "2").unwrap()), 42);
 }
 
@@ -849,7 +849,8 @@ fn dump_ascii_column_is_ignored() {
     assert_eq!(
         child(&n).detail,
         Detail::Text {
-            text: "cafe".into()
+            text: "cafe".into(),
+            len: 4
         }
     );
 }
@@ -933,9 +934,9 @@ fn jwt_hs256() {
     assert_eq!(parts[2].range[1], token.len());
     // Header and payload are text leaves; the signature is random bytes.
     assert!(
-        matches!(&child(&parts[0]).detail, Detail::Text { text } if text.starts_with("{\"alg\""))
+        matches!(&child(&parts[0]).detail, Detail::Text { text, .. } if text.starts_with("{\"alg\""))
     );
-    assert!(matches!(&child(&parts[1]).detail, Detail::Text { text } if text == payload));
+    assert!(matches!(&child(&parts[1]).detail, Detail::Text { text, .. } if text == payload));
 
     let got: Vec<(String, String)> = times
         .iter()
@@ -1838,6 +1839,86 @@ fn bytes_leaf_keeps_only_a_preview() {
         j.contains(r#""len":200"#) && j.contains(r#""truncated":true"#),
         "{j}"
     );
+}
+
+fn with_max_items(n: usize) -> Options {
+    Options {
+        max_items: n,
+        ..Options::default()
+    }
+}
+
+fn has_warning(n: &Node, code: &str) -> bool {
+    n.warnings.iter().any(|w| w.code == code)
+}
+
+#[test]
+fn item_limit_rejects_huge_trees_with_a_warning() {
+    // One CBOR array header claiming a million items, one byte each.
+    let mut arr = vec![0x9a, 0x00, 0x0f, 0x42, 0x40];
+    arr.resize(5 + 1_000_000, 0);
+    let n = peel(&arr, &with_max_items(1000)).unwrap();
+    assert_eq!(n.codec, Codec::Bytes);
+    assert!(has_warning(&n, "TOO_MANY_ITEMS"), "{:?}", n.warnings);
+    // Within the limit it decodes.
+    let n = peel(&arr, &with_max_items(1_000_001)).unwrap();
+    assert_eq!(n.codec, Codec::Cbor);
+    assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+    // Forced, running out is an error.
+    let opts = Options {
+        force: Some(Force::Cbor),
+        ..with_max_items(10)
+    };
+    assert_eq!(peel(&[0u8; 64], &opts).unwrap_err().code, "TOO_MANY_ITEMS");
+}
+
+#[test]
+fn item_limit_charges_only_the_winning_candidate() {
+    // CBOR builds 5 items before failing on invalid UTF-8; MessagePack, the
+    // winner, needs exactly 7. The failed CBOR parse must be refunded.
+    let input = h("82a16101a162920102");
+    let n = peel(&input, &with_max_items(7)).unwrap();
+    assert_eq!(n.codec, Codec::Msgpack);
+    assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+    let n = peel(&input, &with_max_items(6)).unwrap();
+    assert_eq!(n.codec, Codec::Bytes);
+    assert!(has_warning(&n, "TOO_MANY_ITEMS"));
+}
+
+#[test]
+fn item_limit_inside_a_winner_is_reported() {
+    // Field 1 holds a 10-field message; with 5 items the outer message
+    // decodes but its nested message cannot, and the node says why.
+    let mut m = vec![0x0a, 20];
+    for _ in 0..10 {
+        m.extend_from_slice(&[0x08, 0x01]);
+    }
+    let n = peel(&m, &with_max_items(5)).unwrap();
+    assert_eq!(n.codec, Codec::Protobuf);
+    assert!(has_warning(&n, "TOO_MANY_ITEMS"), "{:?}", n.warnings);
+    assert_ne!(top_alt(&msg(&n)[0]).kind.name(), "message");
+    let n = peel(&m, &with_max_items(11)).unwrap();
+    assert!(n.warnings.is_empty());
+    assert_eq!(top_alt(&msg(&n)[0]).kind.name(), "message");
+}
+
+#[test]
+fn text_leaf_keeps_only_its_head() {
+    let t = "é".repeat(TEXT_HEAD + 500);
+    let n = auto(t.as_bytes());
+    match &n.detail {
+        Detail::Text { text, len } => {
+            assert_eq!(text.chars().count(), TEXT_HEAD);
+            assert_eq!(*len, t.len());
+        }
+        d => panic!("{d:?}"),
+    }
+    let j = to_json(&n);
+    assert!(j.contains(r#""truncated":true"#), "{j}");
+    // A short text is kept whole and not marked truncated.
+    let n = auto(b"Hello there");
+    assert!(matches!(&n.detail, Detail::Text { text, len: 11 } if text == "Hello there"));
+    assert!(!to_json(&n).contains("truncated"));
 }
 
 #[test]

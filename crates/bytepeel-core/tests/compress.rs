@@ -25,7 +25,7 @@ fn child(n: &Node) -> &Node {
 
 fn text(n: &Node) -> &str {
     match &n.detail {
-        Detail::Text { text } => text,
+        Detail::Text { text, .. } => text,
         d => panic!("not text: {d:?}"),
     }
 }

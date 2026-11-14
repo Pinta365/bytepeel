@@ -97,6 +97,9 @@ pub struct Node {
 /// Bytes kept in a [`Detail::Bytes`] leaf for its preview.
 pub const BYTES_HEAD: usize = 64;
 
+/// Characters kept in a [`Detail::Text`] leaf.
+pub const TEXT_HEAD: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Detail {
     /// A text encoding (hex/base64/PEM); `child` describes the decoded bytes.
@@ -116,8 +119,15 @@ pub enum Detail {
         parts: Vec<Node>,
         times: Vec<(&'static str, String)>,
     },
-    /// Printable UTF-8 text.
-    Text { text: String },
+    /// Printable UTF-8 text. Only the first [`TEXT_HEAD`] characters are kept
+    /// (what the JSON shows): the full text is the parent's bytes, so a large
+    /// text is not stored twice.
+    Text {
+        /// The first `TEXT_HEAD` characters (all of a shorter text).
+        text: String,
+        /// Byte length of the whole text; `text` is all of it when equal.
+        len: usize,
+    },
     /// Opaque bytes (nothing more specific was found, or the format is not
     /// yet supported). Only the first [`BYTES_HEAD`] bytes are kept, for the
     /// preview: the full bytes are the parent's (the input, a layer's

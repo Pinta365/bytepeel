@@ -7,6 +7,8 @@ export interface Options {
   depth?: number;
   /** Max interpretations kept per protobuf LEN field (default 3). */
   alts?: number;
+  /** Max protobuf fields, CBOR/MessagePack values and DER elements in total (default 1000000). */
+  max_items?: number;
 }
 
 /**

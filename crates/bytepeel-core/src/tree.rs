@@ -219,7 +219,7 @@ fn node(o: &mut String, n: &Node, d: usize) {
                 o.push('\n');
             }
         }
-        Detail::Text { text } => {
+        Detail::Text { text, .. } => {
             o.push(' ');
             quote(o, text, 80);
             o.push('\n');

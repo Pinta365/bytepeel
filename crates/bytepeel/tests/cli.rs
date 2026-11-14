@@ -205,3 +205,26 @@ fn jwt_get_claims_and_parts() {
     assert_eq!(code, 1);
     assert!(err.contains("PATH_NOT_FOUND"), "{err}");
 }
+
+#[test]
+fn max_items_limits_and_lifts() {
+    // A CBOR array of 300 zeros needs 301 items.
+    let mut arr = vec![0x99, 0x01, 0x2c];
+    arr.resize(3 + 300, 0);
+    let (code, out, _) = run(&["--in", "raw", "--max-items", "100"], &arr);
+    assert_eq!(code, 0);
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.starts_with(r#"{"codec":"bytes""#) && s.contains("TOO_MANY_ITEMS"),
+        "{s}"
+    );
+    let (_, out, _) = run(&["--in", "raw", "--max-items", "301"], &arr);
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .starts_with(r#"{"codec":"cbor""#)
+    );
+    let (code, _, err) = run(&["--in", "raw", "--as", "cbor", "--max-items", "5"], &arr);
+    assert_eq!(code, 1);
+    assert!(err.contains("TOO_MANY_ITEMS"), "{err}");
+}

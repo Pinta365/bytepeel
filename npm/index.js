@@ -42,8 +42,8 @@ function optsString(opts = {}) {
   const lines = [];
   for (const [k, v] of Object.entries(opts)) {
     if (v === undefined) continue;
-    if (!["in", "as", "depth", "alts"].includes(k)) {
-      throw new TypeError(`unknown option '${k}' (in, as, depth, alts)`);
+    if (!["in", "as", "depth", "alts", "max_items"].includes(k)) {
+      throw new TypeError(`unknown option '${k}' (in, as, depth, alts, max_items)`);
     }
     lines.push(`${k}=${v}`);
   }

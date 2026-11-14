@@ -5,8 +5,8 @@
 //! reproduces exactly. Zero external dependencies.
 
 use bytepeel_core::{
-    AltKind, Asn1, Asn1Value, Detail, Field, FieldValue, Force, InputForm, Node, Options, TagClass,
-    decode_b64, decode_hex, peel, select, select_der, to_json, to_tree,
+    AltKind, Asn1, Asn1Value, Detail, Field, FieldValue, Force, InputForm, MAX_ITEMS, Node,
+    Options, TagClass, decode_b64, decode_hex, peel, select, select_der, to_json, to_tree,
 };
 
 // ---------------------------------------------------------------- PRNG
@@ -1007,6 +1007,7 @@ fn option_matrix() -> Vec<Options> {
                     alts: 3,
                     input,
                     force,
+                    max_items: MAX_ITEMS,
                 });
             }
         }

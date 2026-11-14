@@ -12,7 +12,7 @@
 //! let node = peel(b"SGVsbG8gd29ybGQ=", &Options::default()).unwrap();
 //! assert_eq!(node.codec.name(), "base64");
 //! let Detail::Layer { child, .. } = &node.detail else { panic!() };
-//! assert!(matches!(&child.detail, Detail::Text { text } if text == "Hello world"));
+//! assert!(matches!(&child.detail, Detail::Text { text, .. } if text == "Hello world"));
 //! ```
 #![forbid(unsafe_code)]
 
@@ -27,6 +27,7 @@ mod error;
 mod json;
 mod jsonpath;
 mod jwt;
+mod limits;
 mod msgpack;
 mod node;
 mod path;
@@ -41,7 +42,7 @@ pub use edit::{NewValue, Op, edit, parse_value, set};
 pub use error::Diag;
 pub use node::{
     Alphabet, Alt, AltKind, Asn1, Asn1Value, BYTES_HEAD, Codec, Detail, Field, FieldValue, Node,
-    TagClass,
+    TEXT_HEAD, TagClass,
 };
 pub use path::{JwtPick, is_der, is_jwt, is_values, select, select_der, select_jwt, select_value};
 pub use text::{B64, decode_b64, decode_hex};
@@ -82,7 +83,14 @@ pub struct Options {
     pub input: InputForm,
     /// Force the interpretation of the first decoded byte layer.
     pub force: Option<Force>,
+    /// Maximum protobuf fields, CBOR/MessagePack values and DER elements per
+    /// peel, in total (`TOO_MANY_ITEMS` beyond it). Each costs memory and
+    /// output far beyond the input bytes it can take up.
+    pub max_items: usize,
 }
+
+/// Default for [`Options::max_items`].
+pub const MAX_ITEMS: usize = 1_000_000;
 
 impl Default for Options {
     fn default() -> Self {
@@ -91,6 +99,7 @@ impl Default for Options {
             alts: 3,
             input: InputForm::Auto,
             force: None,
+            max_items: MAX_ITEMS,
         }
     }
 }

@@ -27,7 +27,7 @@ new TextDecoder().decode(out);                  // "08 96 01 18 2a"
 ```
 
 - **Options** (all methods): `{ in: "auto"|"hex"|"base64"|"raw", as:
-  "protobuf"|"der"|"cbor"|"msgpack"|"text"|"bytes", depth, alts }`.
+  "protobuf"|"der"|"cbor"|"msgpack"|"text"|"bytes", depth, alts, max_items }`.
 - **Input:** a string (UTF-8) or `Uint8Array`/`ArrayBuffer`/typed array.
 - **Values** are typed: a string is text (never parsed, so `"42"` is the
   text `42`); an integer `number` or a `bigint` is an integer; other numbers

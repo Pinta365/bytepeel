@@ -9,7 +9,7 @@ use crate::node::{Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValu
 use crate::value::{self, Value, ValueKind};
 use crate::{Diag, der, text, varint};
 
-const TEXT_CAP: usize = 1024;
+const TEXT_CAP: usize = crate::node::TEXT_HEAD;
 /// A bytes leaf keeps exactly what its `hex` shows.
 const HEX_CAP: usize = crate::node::BYTES_HEAD;
 const PACKED_CAP: usize = 64;
@@ -324,7 +324,13 @@ fn node(o: &mut String, n: &Node) {
                 o.push('}');
             }
         }
-        Detail::Text { text } => text_kv(o, "text", text),
+        Detail::Text { text, len } => {
+            // `text` is the leaf's head: at most TEXT_CAP characters.
+            text_kv(o, "text", text);
+            if *len > text.len() {
+                o.push_str(",\"truncated\":true");
+            }
+        }
         Detail::Bytes { len, head } => {
             let _ = write!(o, ",\"len\":{len}");
             hex_head_kv(o, head, *len);

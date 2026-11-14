@@ -51,6 +51,7 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
                                      force interpretation of the decoded bytes
 --depth <N>                          max nesting (default 16)
 --alts <N>                           interpretations kept per LEN field (default 3)
+--max-items <N>                      max fields/values/elements decoded in total (default 1000000)
 --get <PATH>                         protobuf: field numbers, e.g. 1.3[2].4
                                      DER: 0-based child indices, e.g. 0.0.6
                                      PEM bundle: first index picks the block, e.g. 1.0.0.5

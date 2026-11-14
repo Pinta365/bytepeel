@@ -3,6 +3,7 @@
 use crate::cbor;
 use crate::compress::{self, Outcome};
 use crate::jwt;
+use crate::limits;
 use crate::msgpack;
 use crate::node::{Alphabet, Codec, Detail, Node};
 use crate::text::{self, is_printable};
@@ -34,6 +35,7 @@ struct Cand {
 
 pub(crate) fn peel(input: &[u8], opts: &Options) -> Result<Node, Diag> {
     let _budget = compress::BudgetScope::new();
+    let _items = limits::Scope::new(opts.max_items);
     match opts.input {
         InputForm::Auto => {
             if opts.depth > 0 {
@@ -471,9 +473,15 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
             None => {}
         }
     }
+    // Candidate parses are charged against the item limit only if they win:
+    // each starts from `before`, and the winner's cost is kept at the end.
+    let before = limits::left();
+    limits::take_hit();
     if let Some((items, st)) = der::detect(buf) {
         return der_node(buf.len(), items, &st);
     }
+    let mut hit = limits::take_hit();
+    limits::restore(before);
     if let Some(format) = sniff(buf) {
         let w = Diag::new(
             "UNSUPPORTED_FORMAT",
@@ -488,33 +496,35 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
         return bytes_leaf(buf, 0.5, vec![]);
     }
     let mut cands: Vec<Candidate> = Vec::new();
-    if let Some((items, conf, text_keys)) = cbor::detect(buf) {
-        cands.push(Candidate {
-            codec: Codec::Cbor,
-            conf,
-            text_keys,
-            payload: Payload::Values(items),
-        });
-    }
-    if let Some((items, conf, text_keys)) = msgpack::detect(buf) {
-        cands.push(Candidate {
-            codec: Codec::Msgpack,
-            conf,
-            text_keys,
-            payload: Payload::Values(items),
-        });
-    }
-    if let Ok((fields, st)) = protobuf::parse_message(buf, 0, buf.len(), depth, opts) {
-        let conf = protobuf::plausibility(&st, buf.len());
-        if conf >= MESSAGE_THRESHOLD {
-            cands.push(Candidate {
-                codec: Codec::Protobuf,
+    // Run one candidate parse from `before`: its cost, and whether it ran out.
+    let mut attempt = |cands: &mut Vec<Candidate>, c: Option<(Codec, f64, bool, Payload)>| {
+        let cost = before - limits::left();
+        let ran_out = limits::take_hit();
+        limits::restore(before);
+        match c {
+            Some((codec, conf, text_keys, payload)) => cands.push(Candidate {
+                codec,
                 conf,
-                text_keys: false,
-                payload: Payload::Fields(fields),
-            });
+                text_keys,
+                payload,
+                cost,
+                ran_out,
+            }),
+            None => hit |= ran_out,
         }
-    }
+    };
+    let c =
+        cbor::detect(buf).map(|(items, conf, tk)| (Codec::Cbor, conf, tk, Payload::Values(items)));
+    attempt(&mut cands, c);
+    let c = msgpack::detect(buf)
+        .map(|(items, conf, tk)| (Codec::Msgpack, conf, tk, Payload::Values(items)));
+    attempt(&mut cands, c);
+    let c = protobuf::parse_message(buf, 0, buf.len(), depth, opts)
+        .ok()
+        .map(|(fields, st)| (protobuf::plausibility(&st, buf.len()), fields))
+        .filter(|(conf, _)| *conf >= MESSAGE_THRESHOLD)
+        .map(|(conf, fields)| (Codec::Protobuf, conf, false, Payload::Fields(fields)));
+    attempt(&mut cands, c);
     // Highest confidence wins; on a tie prefer all-text map keys, then the
     // order above (CBOR, MessagePack, protobuf). A stable sort keeps that order.
     cands.sort_by(|a, b| {
@@ -524,12 +534,24 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
     });
     let mut cands = cands.into_iter();
     let Some(best) = cands.next() else {
-        return bytes_leaf(buf, 0.5, vec![]);
+        // Nothing parsed. If a parse failed only by running out of items,
+        // say so rather than leave an unexplained bytes leaf.
+        let w = if hit {
+            vec![limits::too_many(None)]
+        } else {
+            vec![]
+        };
+        return bytes_leaf(buf, 0.5, w);
     };
+    limits::restore(before - best.cost);
     let others: Vec<String> = cands
         .map(|c| format!("{} ({:.2})", c.codec.name(), c.conf))
         .collect();
     let mut warnings = vec![];
+    if best.ran_out {
+        // A nested message ran out of items and was left undecoded.
+        warnings.push(limits::too_many(None));
+    }
     if !others.is_empty() {
         warnings.push(Diag::new(
             "AMBIGUOUS_FORMAT",
@@ -564,6 +586,10 @@ struct Candidate {
     /// Every map key is a text string (tie-break signal).
     text_keys: bool,
     payload: Payload,
+    /// Items the parse built (charged only if it wins).
+    cost: usize,
+    /// The parse ran out of items somewhere inside (e.g. a nested message).
+    ran_out: bool,
 }
 
 enum Payload {
@@ -635,7 +661,11 @@ fn text_leaf(t: &str, conf: f64) -> Node {
         range: [0, t.len()],
         confidence: conf,
         detail: Detail::Text {
-            text: t.to_string(),
+            text: match t.char_indices().nth(crate::node::TEXT_HEAD) {
+                Some((cut, _)) => t[..cut].to_string(),
+                None => t.to_string(),
+            },
+            len: t.len(),
         },
         warnings: vec![],
     }

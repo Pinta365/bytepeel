@@ -42,6 +42,14 @@ input ─┬─ text? ─► best text layer (PEM | JWT | xxd/hexdump | hex | ba
 
 `--depth` limits total nesting (text and compression layers plus protobuf
 messages, default 16). `--as` applies after any text and compression layers.
+`--max-items` limits the total number of protobuf fields, CBOR/MessagePack
+values and DER elements per run (default 1,000,000; `Options::max_items`).
+One item can take a single input byte but costs hundreds of bytes of memory
+and tens of bytes of JSON, so without it a few megabytes of input could build
+gigabytes. A detection candidate that runs out is rejected and the data stays
+a `bytes` leaf with a `TOO_MANY_ITEMS` warning (a forced `--as` returns the
+error); a winner whose nested message ran out keeps that field undecoded and
+carries the warning. Only the winning candidate's items count.
 
 ### Cargo features (`bytepeel-core`)
 
@@ -425,7 +433,7 @@ in.
 `op`: 0 peel (JSON), 1 tree, 2 get (JSON), 3 get raw payload, 4 edit. `arg`
 is the path (get) or the edits as NUL-separated `kind, path, value` triples
 (`set`/`add`/`del`, values in the CLI syntax). `opts` is `key=value` lines
-(`in`, `as`, `depth`, `alts`). The result is `[status u8][len u32 LE][len
+(`in`, `as`, `depth`, `alts`, `max_items`). The result is `[status u8][len u32 LE][len
 bytes]`: status 0 is the output, 1 is `{"error":{...}}` JSON; free it with
 `bp_free(ptr, 5 + len)`.
 
@@ -454,6 +462,7 @@ with typed edit values (strings are text, numbers are numbers) and
 | CBOR / MessagePack / protobuf | when several accept the buffer, the highest confidence wins; on a tie prefer all-text map keys, then CBOR, then MessagePack, then protobuf. Every other interpretation is named with its confidence in one `AMBIGUOUS_FORMAT` warning. Map-less trees score 0.6 because many protobuf messages whose first tag is for field 16+ also parse as a CBOR/MessagePack array. Candidates are parsed structurally; nested detection (byte strings, protobuf string fields) runs once, on the winner |
 | gzip / zstd | magic `1f 8b 08` / `28 b5 2f fd`; decoded (confidence 1.0) only if the stream is complete and its CRC32 / content checksum matches, else a `bytes` leaf with the error as a warning |
 | zlib | a valid 2-byte header (CM 8, CINFO ≤ 7, FCHECK, no FDICT) whose stream inflates with a matching Adler-32. Failures are reported only for the common headers `78 01/5e/9c/da`; other headers fall through to DER/protobuf |
+| Item limit | 1,000,000 fields/values/elements per run (`--max-items`), losing candidates refunded |
 | Decompressed size | capped at 64 MiB per stream (concatenated gzip members and zstd frames share the cap) and 256 MiB in total per peel across every compressed layer (`OUTPUT_TOO_LARGE`) |
 | LEN alt: message | plausibility, ×0.3 if the payload is fully printable |
 | LEN alt: string | 0.9 × printable_ratio⁴ |
@@ -502,6 +511,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `AMBIGUOUS_FORMAT` | The buffer also parses as one or more other codecs; the message names each with its confidence |
 | Warning: `CORRUPT_DATA` | A gzip/zlib/zstd stream is truncated or invalid |
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
+| Warning / error: `TOO_MANY_ITEMS` | The input needs more protobuf fields, CBOR/MessagePack values and DER elements than `--max-items` allows (an error only with `--as`) |
 | Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB, or the 256 MiB total budget for the input is exhausted |
 | `BAD_VALUE` | A `set` value is not in the value syntax (exit 2) |
 | `TYPE_MISMATCH` | A `set` value does not fit the field's wire type |

@@ -2,7 +2,7 @@
 //! is the input. Errors are fine; panics are not.
 #![no_main]
 
-use bytepeel_core::{Force, InputForm, Options, diag_to_json, peel, to_json, to_tree};
+use bytepeel_core::{Force, InputForm, MAX_ITEMS, Options, diag_to_json, peel, to_json, to_tree};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -25,6 +25,8 @@ fuzz_target!(|data: &[u8]| {
         ][usize::from((a >> 2) % 7)],
         depth: usize::from(b & 0x1f),
         alts: usize::from(b >> 5) + 1,
+        // Small limits exercise the TOO_MANY_ITEMS paths.
+        max_items: [MAX_ITEMS, 1, 7][input.len() % 3],
     };
     match peel(input, &opts) {
         Ok(node) => {
