@@ -18,6 +18,7 @@ USAGE:
                                                   array index (insert), DER index (insert;
                                                   VALUE = one element as hex:/b64:)
                                      --del PATH   remove
+                                   Paths are --get paths and cross formats the same way.
 
 OPTIONS:
     --in <auto|hex|base64|raw>     How to read the input (default: auto)

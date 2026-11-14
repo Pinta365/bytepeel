@@ -4,9 +4,7 @@
 //! (the library verifies this itself; this re-checks it independently).
 #![no_main]
 
-use bytepeel_core::{
-    Op, Options, edit, is_der, is_values, parse_value, peel, select, select_der, select_value,
-};
+use bytepeel_core::{Op, Options, edit, get, parse_value, peel};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -43,14 +41,7 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(out) = result {
         let n = peel(&out, &opts).expect("auto-detection never fails");
-        // The same dispatch as the CLI: value trees use value paths.
-        let found = if is_values(&n) {
-            select_value(&n, path).is_ok()
-        } else if is_der(&n) {
-            select_der(&n, path).is_ok()
-        } else {
-            select(&n, path).is_ok()
-        };
-        assert!(found, "edited output lost the path");
+        // The same lookup as the CLI's --get, which crosses formats.
+        assert!(get(&n, path).is_ok(), "edited output lost the path");
     }
 });

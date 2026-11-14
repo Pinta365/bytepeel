@@ -238,8 +238,7 @@ fn errors() {
 
 #[test]
 fn jwt_payloads_are_not_editable() {
-    // A protobuf payload inside a JWT has no --get path (the token is not a
-    // message), so set reports the same error instead of silently producing
+    // Editing anything inside a JWT is refused instead of silently producing
     // a token whose signature no longer matches.
     let seg = |b: &[u8]| {
         b64(b)
@@ -254,7 +253,7 @@ fn jwt_payloads_are_not_editable() {
     );
     assert_eq!(
         set1(tok.as_bytes(), "1", "1").unwrap_err().code,
-        "PATH_NOT_MESSAGE"
+        "REENCODE_UNSUPPORTED"
     );
 }
 
@@ -882,4 +881,156 @@ fn single_hex_token_grows_as_one_token() {
 fn plus_sign_integers() {
     assert!(matches!(parse_value("+5").unwrap(), NewValue::Int(5)));
     assert_eq!(set_s("089601", "1", "+5"), "0805");
+}
+
+// ------------------------------------------------------------ across formats
+
+fn len_field(num: u8, data: &[u8]) -> Vec<u8> {
+    let mut o = vec![(num << 3) | 2];
+    let mut n = data.len();
+    while n >= 0x80 {
+        o.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    o.push(n as u8);
+    o.extend_from_slice(data);
+    o
+}
+
+fn isrg_der() -> Vec<u8> {
+    match &peel(ISRG_X2.as_bytes(), &Options::default())
+        .unwrap()
+        .detail
+    {
+        Detail::Layer { decoded, .. } => decoded.clone(),
+        d => panic!("{d:?}"),
+    }
+}
+
+fn get_text(n: &Node, path: &str) -> String {
+    match get(n, path) {
+        Ok(p) => String::from_utf8(p.payload().unwrap()).unwrap(),
+        Err(e) => panic!("{path}: {} {}", e.code, e.message),
+    }
+}
+
+fn edit1(input: &[u8], op: Op) -> Result<Vec<u8>, Diag> {
+    edit(input, &Options::default(), &op)
+}
+
+#[test]
+fn set_crosses_from_protobuf_into_base64_der() {
+    let der_b64 = b64(&isrg_der());
+    let mut m = len_field(1, b"hello");
+    m.extend(len_field(2, der_b64.as_bytes())); // base64 DER in a string
+    m.extend(len_field(3, &isrg_der())); // raw DER in a bytes field
+    m.extend(len_field(4, ISRG_X2.as_bytes())); // a PEM block
+    for root in ["2", "3", "4"] {
+        let path = format!("{root}.0.0.5.2.0.1");
+        let out = set1(&m, &path, "\"Test Root\"").unwrap();
+        let n = peel(&out, &Options::default()).unwrap();
+        assert_eq!(get_text(&n, &path), "Test Root", "{root}");
+        // The other fields and the holder's own encoding are untouched.
+        assert_eq!(get_text(&n, "1"), "hello");
+        for other in ["2", "3", "4"].iter().filter(|r| **r != root) {
+            assert_eq!(
+                get_text(&n, &format!("{other}.0.0.5.2.0.1")),
+                "ISRG Root X2"
+            );
+        }
+        match root {
+            "2" => assert!(
+                get_text(&n, root)
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c))
+            ),
+            "4" => assert!(get_text(&n, root).starts_with("-----BEGIN CERTIFICATE-----\n")),
+            _ => {}
+        }
+        // Setting the current value back restores the input byte for byte.
+        let back = set1(&out, &path, "\"ISRG Root X2\"").unwrap();
+        assert_eq!(back, m, "{root}");
+    }
+}
+
+#[test]
+fn set_add_and_del_inside_a_cbor_byte_string() {
+    // {"p": h'089601'}: the byte string is protobuf.
+    let c = h("a1 6170 43 089601");
+    let out = setv(&c, &Options::default(), "p.1", "300").unwrap();
+    assert_eq!(out, h("a1 6170 43 08ac02"));
+    let out = edit1(&c, Op::Add("p.2".into(), NewValue::Int(5))).unwrap();
+    assert_eq!(out, h("a1 6170 45 089601 1005"));
+    let out = edit1(&out, Op::Del("p.1".into())).unwrap();
+    assert_eq!(out, h("a1 6170 42 1005"));
+}
+
+#[test]
+fn set_crosses_twice() {
+    // Protobuf field 1 holds the hex text of CBOR {"x": h'089601'}, whose
+    // byte string is protobuf again.
+    let inner = h("a1 6178 43 089601");
+    let hex: String = inner.iter().map(|b| format!("{b:02x}")).collect();
+    let mut m = len_field(1, hex.as_bytes());
+    m.extend(len_field(2, b"keep"));
+    let out = set1(&m, "1.x.1", "7").unwrap();
+    let n = peel(&out, &Options::default()).unwrap();
+    match get(&n, "1.x.1").unwrap() {
+        Pick::Field(f) => assert_eq!(uint(f), 7),
+        p => panic!("{p:?}"),
+    }
+    assert_eq!(get_text(&n, "1"), "a1617842 0807".replace(' ', ""));
+    assert_eq!(get_text(&n, "2"), "keep");
+}
+
+#[test]
+fn set_across_formats_errors() {
+    // A JWT in a protobuf string: its claims are readable but not editable.
+    let token = format!(
+        "{}.{}.",
+        b64url(br#"{"alg":"none"}"#),
+        b64url(br#"{"sub":"alice"}"#)
+    );
+    let m = len_field(3, token.as_bytes());
+    assert_eq!(
+        set1(&m, "3.payload.sub", "\"bob\"").unwrap_err().code,
+        "REENCODE_UNSUPPORTED"
+    );
+    // A JWS whose payload is protobuf: crossing through a JWT part.
+    let token = format!(
+        "{}.{}.",
+        b64url(br#"{"alg":"none"}"#),
+        b64url(&h("0a03666f6f"))
+    );
+    assert_eq!(
+        set1(token.as_bytes(), "payload.1", "\"bar\"")
+            .unwrap_err()
+            .code,
+        "REENCODE_UNSUPPORTED"
+    );
+    // The inner path's own errors come through unchanged.
+    let c = h("a1 6170 43 089601");
+    let e = setv(&c, &Options::default(), "p.1", "\"text\"").unwrap_err();
+    assert_eq!(e.code, "TYPE_MISMATCH");
+    let e = setv(&c, &Options::default(), "p.9", "1").unwrap_err();
+    assert_eq!(e.code, "PATH_NOT_FOUND");
+    // Deleting the last field leaves an empty byte string, which no longer
+    // decodes as protobuf, so the edit cannot be verified.
+    let e = edit1(&c, Op::Del("p.1".into())).unwrap_err();
+    assert_eq!(e.code, "REENCODE_VERIFY_FAILED");
+}
+
+#[test]
+fn native_paths_win_over_crossing() {
+    // Field 1 is a submessage: `1.1` edits it natively.
+    let m = h("0a03 089601");
+    let out = set1(&m, "1.1", "1").unwrap();
+    assert_eq!(out, h("0a02 0801"));
+}
+
+fn b64url(d: &[u8]) -> String {
+    b64(d)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
 }

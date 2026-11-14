@@ -81,7 +81,14 @@ $ echo '08 96 01 12 03 66 6f 6f' | bytepeel set 3+=42 --del 2
 08 96 01 18 2a
 
 $ bytepeel set '0.0.5.2.0.1="Test Root"' '0.0.4.1="2045-06-07T08:09:10Z"' ca.pem > test-ca.pem
+
+$ echo 'a1 61 70 43 08 96 01' | bytepeel set p.1=300 'p.2+="hi"'   # protobuf in a CBOR byte string
+a1 61 70 47 08 ac 02 12 02 68 69
 ```
+
+Paths cross formats as `--get` paths do: `2.0.0.5.2.0.1='"Test Root"'`
+changes the common name of a base64 certificate in protobuf string field 2,
+and both the certificate's base64 and the protobuf around it are re-encoded.
 
 Editing a certificate invalidates its signature; that's fine for test
 fixtures, and you re-sign it if it must verify.

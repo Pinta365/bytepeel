@@ -315,8 +315,8 @@ A `range` points into the buffer the node or field was parsed from:
   of protobuf in a byte string. Descent within a format always wins, so a
   single-format path keeps its meaning. The result is printed in the
   selected item's own schema (Field, Element, Value or the JWT form), with
-  ranges in the buffer of the node it was found in. `bytepeel set` paths do
-  not cross formats.
+  ranges in the buffer of the node it was found in. `bytepeel set` paths
+  cross formats the same way.
 
 ## Re-encoding (`bytepeel set`)
 
@@ -352,6 +352,16 @@ in.
   so the length of every enclosing element is rewritten, including
   encapsulating BIT/OCTET STRINGs (a BIT STRING keeps its unused-bits byte).
   Tag bytes are kept verbatim; rewritten lengths use the minimal DER form.
+- **Paths cross formats** exactly as `--get` paths do (`2.0.0.5.2.0.1=..`
+  changes a certificate's common name in protobuf string field 2;
+  `p.1=300` a field of protobuf in a CBOR byte string). The decoded data is
+  edited and re-encoded through its own layers (base64, PEM, hex, …), then
+  the field or byte string holding it is set to the new bytes, which may
+  repeat through several crossings. An add or remove is located by its
+  parent, so `p.2+=5` adds a field to the protobuf in byte string `p`.
+  Verification decodes the whole output and follows the path back into the
+  decoded data. Deleting the last item of decoded data fails verification
+  when the empty result no longer decodes (`REENCODE_VERIFY_FAILED`).
 - **Layers are re-encoded in their original style:** hex keeps its separator,
   case, `0x` form, wrapping and surrounding whitespace; dumps keep the
   `xxd`/`hexdump -C` layout; base64 keeps its alphabet, padding, line width
@@ -426,10 +436,10 @@ in.
   CBOR array `97` becomes `98 18`, a 15-entry MessagePack fixmap becomes
   `map16`). Indefinite CBOR containers have no count: items go before the
   break byte.
-- **Not editable yet:** JWT (editing would invalidate the signature),
+- **Not editable yet:** JWT, including data inside a JWT part (editing
+  would invalidate the signature),
   multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
-  headers (`REENCODE_UNSUPPORTED`), data nested inside a CBOR/MessagePack
-  byte string (`set` paths do not enter it, though `--get` paths do), top-level items of a
+  headers (`REENCODE_UNSUPPORTED`), top-level items of a
   multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.
 
 ## WebAssembly (`crates/bytepeel-wasm`, `npm/`)
@@ -552,7 +562,6 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   `--as cbor` / `--as msgpack`. JSON floats print `-0.0` as `0`.
 - DER: only OIDs in a built-in table (~175) are named; BER indefinite
   lengths and constructed strings are not supported.
-- `bytepeel set` paths do not cross formats (`--get` paths do).
 
 ## Roadmap
 

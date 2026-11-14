@@ -240,3 +240,14 @@ fn get_crosses_formats() {
     let s = String::from_utf8(out).unwrap();
     assert!(s.starts_with(r#"{"field":1,"wire":"LEN""#), "{s}");
 }
+
+#[test]
+fn set_crosses_formats() {
+    // Protobuf inside a CBOR byte string: change one field, add another.
+    let (code, out, err) = run(
+        &["set", "p.1=300", "p.2+=\"hi\""],
+        b"a1 61 70 43 08 96 01\n",
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"a1 61 70 47 08 ac 02 12 02 68 69\n");
+}

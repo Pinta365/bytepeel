@@ -71,6 +71,10 @@ impl Pick<'_> {
 /// of a base64 certificate in protobuf string field 2, or `token.payload.sub`
 /// for a JWT in a CBOR byte string.
 pub fn get<'a>(root: &'a Node, path: &str) -> Result<Pick<'a>, Diag> {
+    walk(root, &segments(path)?, 0, &mut None)
+}
+
+fn segments(path: &str) -> Result<Vec<&str>, Diag> {
     if path.trim().is_empty() {
         return Err(Diag::new("BAD_PATH", "empty path", None));
     }
@@ -82,7 +86,57 @@ pub fn get<'a>(root: &'a Node, path: &str) -> Result<Pick<'a>, Diag> {
             None,
         ));
     }
-    walk(root, &segs, 0)
+    Ok(segs)
+}
+
+/// What holds a decoded node that a path crossed into.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Holder<'a> {
+    Field(&'a Field),
+    Value(&'a Value),
+    /// A JWT part that is not JSON.
+    Jwt,
+}
+
+/// Where a path crosses into a decoded node: `segs[at..]` continue in `node`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Crossing<'a> {
+    pub at: usize,
+    pub holder: Holder<'a>,
+    pub node: &'a Node,
+}
+
+/// [`get`], plus the last place the path crossed formats.
+pub(crate) fn locate<'a>(
+    root: &'a Node,
+    path: &str,
+) -> Result<(Pick<'a>, Option<Crossing<'a>>), Diag> {
+    let mut cx = None;
+    let pick = walk(root, &segments(path)?, 0, &mut cx)?;
+    Ok((pick, cx))
+}
+
+/// The decoded node of a selection that has no children in its own format
+/// (a string or bytes field, a byte string), as a crossing at `at`.
+pub(crate) fn leaf_crossing<'a>(pick: &Pick<'a>, at: usize) -> Option<Crossing<'a>> {
+    match pick {
+        Pick::Field(f) if field_children(f).is_none() => decoded_alt(f).map(|node| Crossing {
+            at,
+            holder: Holder::Field(f),
+            node,
+        }),
+        Pick::Value(v) => match &v.untagged().kind {
+            ValueKind::Bytes {
+                decoded: Some(n), ..
+            } => Some(Crossing {
+                at,
+                holder: Holder::Value(v),
+                node: n,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn at(segs: &[&str], n: usize) -> String {
@@ -102,7 +156,12 @@ fn no_children(segs: &[&str], n: usize, what: &str) -> Diag {
 }
 
 /// Walk `segs[i..]` starting in `node` (text layers are skipped).
-fn walk<'a>(node: &'a Node, segs: &[&str], i: usize) -> Result<Pick<'a>, Diag> {
+fn walk<'a>(
+    node: &'a Node,
+    segs: &[&str],
+    i: usize,
+    cx: &mut Option<Crossing<'a>>,
+) -> Result<Pick<'a>, Diag> {
     if let Some(parts) = bundle_parts(node) {
         let block: usize = segs[i]
             .parse()
@@ -115,19 +174,19 @@ fn walk<'a>(node: &'a Node, segs: &[&str], i: usize) -> Result<Pick<'a>, Diag> {
                 "a bundle path needs an element index after the block".into(),
             ));
         }
-        return walk(part, segs, i + 1);
+        return walk(part, segs, i + 1, cx);
     }
     if let Some(items) = der_items(node) {
         return walk_der(items, segs, i);
     }
     if let Some(items) = values_items(node) {
-        return walk_values(items, segs, i);
+        return walk_values(items, segs, i, cx);
     }
     if jwt_parts(node).is_some() {
-        return walk_jwt(node, segs, i);
+        return walk_jwt(node, segs, i, cx);
     }
     if let Some(fields) = message_fields(node) {
-        return walk_fields(fields, segs, i);
+        return walk_fields(fields, segs, i, cx);
     }
     Err(Diag::new(
         "PATH_NOT_MESSAGE",
@@ -151,7 +210,12 @@ fn bad_index(seg: &str, what: &str) -> Diag {
     )
 }
 
-fn walk_fields<'a>(mut fields: &'a [Field], segs: &[&str], mut i: usize) -> Result<Pick<'a>, Diag> {
+fn walk_fields<'a>(
+    mut fields: &'a [Field],
+    segs: &[&str],
+    mut i: usize,
+    cx: &mut Option<Crossing<'a>>,
+) -> Result<Pick<'a>, Diag> {
     loop {
         let (num, idx) = path::parse_path(segs[i])?[0];
         let f = fields
@@ -169,7 +233,14 @@ fn walk_fields<'a>(mut fields: &'a [Field], segs: &[&str], mut i: usize) -> Resu
         }
         // A string or bytes field whose content decodes to another format.
         return match decoded_alt(f) {
-            Some(n) => walk(n, segs, i),
+            Some(node) => {
+                *cx = Some(Crossing {
+                    at: i,
+                    holder: Holder::Field(f),
+                    node,
+                });
+                walk(node, segs, i, cx)
+            }
             None => Err(no_children(segs, i, "the field")),
         };
     }
@@ -215,7 +286,12 @@ fn walk_der<'a>(mut items: &'a [Asn1], segs: &[&str], mut i: usize) -> Result<Pi
     }
 }
 
-fn walk_values<'a>(items: &'a [Value], segs: &[&str], mut i: usize) -> Result<Pick<'a>, Diag> {
+fn walk_values<'a>(
+    items: &'a [Value],
+    segs: &[&str],
+    mut i: usize,
+    cx: &mut Option<Crossing<'a>>,
+) -> Result<Pick<'a>, Diag> {
     let mut cur = if items.len() == 1 {
         &items[0]
     } else {
@@ -244,8 +320,16 @@ fn walk_values<'a>(items: &'a [Value], segs: &[&str], mut i: usize) -> Result<Pi
             }
             // A byte string that decodes to another format.
             ValueKind::Bytes {
-                decoded: Some(n), ..
-            } => return walk(n, segs, i),
+                decoded: Some(node),
+                ..
+            } => {
+                *cx = Some(Crossing {
+                    at: i,
+                    holder: Holder::Value(cur),
+                    node,
+                });
+                return walk(node, segs, i, cx);
+            }
             _ => return Err(no_children(segs, i, "the value")),
         };
         i += 1;
@@ -253,14 +337,24 @@ fn walk_values<'a>(items: &'a [Value], segs: &[&str], mut i: usize) -> Result<Pi
     Ok(Pick::Value(cur))
 }
 
-fn walk_jwt<'a>(node: &'a Node, segs: &[&str], i: usize) -> Result<Pick<'a>, Diag> {
+fn walk_jwt<'a>(
+    node: &'a Node,
+    segs: &[&str],
+    i: usize,
+    cx: &mut Option<Crossing<'a>>,
+) -> Result<Pick<'a>, Diag> {
     let rest = segs[i..].join(".");
     if i + 1 < segs.len() {
         let part = path::select_jwt(node, segs[i])?;
         if !part_is_json(&part) {
             // Not JSON (e.g. a JWE part, or a binary payload): continue in
             // whatever the part decodes to.
-            return walk(part.node, segs, i + 1);
+            *cx = Some(Crossing {
+                at: i + 1,
+                holder: Holder::Jwt,
+                node: part.node,
+            });
+            return walk(part.node, segs, i + 1, cx);
         }
     }
     path::select_jwt(node, &rest).map(Pick::Jwt)

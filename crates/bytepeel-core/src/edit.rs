@@ -7,11 +7,15 @@
 //! encodings elsewhere. The result is decoded again and checked before it is
 //! returned.
 
+use crate::get::{self, Crossing, Holder};
 use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass};
 use crate::path::{
-    bundle_parts, der_items, field_children, map_index, message_fields, parse_path, values_items,
+    bundle_parts, der_items, field_children, jwt_parts, map_index, message_fields, parse_path,
+    values_items,
 };
 use crate::value::{Value, ValueKind};
+use std::cell::RefCell;
+
 use crate::{Diag, Options, cbor, compress, der, encode_value, msgpack, reencode, text, varint};
 
 /// A new value for a field, parsed from the CLI syntax (see [`parse_value`]).
@@ -176,17 +180,106 @@ pub fn set(input: &[u8], opts: &Options, path: &str, value: &NewValue) -> Result
 /// is returned only if it holds exactly the requested change.
 pub fn edit(input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
     let root = crate::peel(input, opts)?;
-    if crate::is_values(&root) {
-        return values_op(&root, input, opts, op);
-    }
-    if crate::is_der(&root) {
-        return der_op(&root, input, opts, op);
-    }
-    protobuf_op(&root, input, opts, op)
+    let rp = |out: &[u8]| crate::peel(out, opts).map_err(vf);
+    Ok(edit_at(&root, input, op, &rp)?.0)
 }
 
-fn reparse(out: &[u8], opts: &Options) -> Result<Node, Diag> {
-    crate::peel(out, opts).map_err(vf)
+/// Decodes re-encoded bytes for verification, giving the node the edit's
+/// path is relative to.
+type Reparse<'r> = dyn Fn(&[u8]) -> Result<Node, Diag> + 'r;
+
+/// Apply `op` to `root` (decoded from `input`); returns the new bytes and
+/// their verified decoding.
+fn edit_at(root: &Node, input: &[u8], op: &Op, rp: &Reparse<'_>) -> Result<(Vec<u8>, Node), Diag> {
+    if let Some(c) = crossing(root, op)? {
+        return edit_across(root, input, op, c, rp);
+    }
+    if jwt_parts(root).is_some() {
+        return Err(jwt_unsupported());
+    }
+    if crate::is_values(root) {
+        return values_op(root, input, op, rp);
+    }
+    if crate::is_der(root) {
+        return der_op(root, input, op, rp);
+    }
+    protobuf_op(root, input, op, rp)
+}
+
+impl Op {
+    fn path(&self) -> &str {
+        match self {
+            Op::Set(p, _) | Op::Add(p, _) | Op::Del(p) => p,
+        }
+    }
+
+    fn with_path(&self, path: String) -> Op {
+        match self {
+            Op::Set(_, v) => Op::Set(path, v.clone()),
+            Op::Add(_, v) => Op::Add(path, v.clone()),
+            Op::Del(_) => Op::Del(path),
+        }
+    }
+}
+
+/// Where `op`'s path last crosses into a decoded node, as `--get` walks it.
+/// An add or delete is located by its parent, which may itself be a string
+/// or byte string holding the decoded data (`2.0` adds element 0 to the DER
+/// in protobuf string field 2).
+fn crossing<'a>(root: &'a Node, op: &Op) -> Result<Option<Crossing<'a>>, Diag> {
+    let path = op.path();
+    if let Op::Set(..) = op {
+        return Ok(get::locate(root, path)?.1);
+    }
+    let Some((parent, _)) = path.rsplit_once('.') else {
+        return Ok(None);
+    };
+    // A bad parent is reported by the single-format op, with its own errors.
+    let Ok((pick, cx)) = get::locate(root, parent) else {
+        return Ok(None);
+    };
+    Ok(get::leaf_crossing(&pick, parent.split('.').count()).or(cx))
+}
+
+/// An edit inside decoded data: edit the inner bytes, then set the item that
+/// holds them (which may itself be inside decoded data) to the new bytes.
+/// Verification decodes the whole output and follows the path back into the
+/// decoded node, so the inner edit is checked as `--get` will see it.
+fn edit_across(
+    root: &Node,
+    input: &[u8],
+    op: &Op,
+    c: Crossing<'_>,
+    rp: &Reparse<'_>,
+) -> Result<(Vec<u8>, Node), Diag> {
+    let payload = match c.holder {
+        Holder::Field(f) => f.payload(),
+        Holder::Value(v) => v.untagged().payload(),
+        Holder::Jwt => return Err(jwt_unsupported()),
+    }
+    .ok_or_else(|| unsupported("the decoded data's holder has no payload"))?;
+    let segs: Vec<&str> = op.path().split('.').collect();
+    let prefix = segs[..c.at].join(".");
+    let inner_op = op.with_path(segs[c.at..].join("."));
+    let done: RefCell<Option<(Vec<u8>, Node)>> = RefCell::new(None);
+    let inner_rp = |inner: &[u8]| -> Result<Node, Diag> {
+        let set = Op::Set(prefix.clone(), NewValue::Bytes(inner.to_vec()));
+        let (out, again) = edit_at(root, input, &set, rp)?;
+        let node = match crossing(&again, op) {
+            Ok(Some(c2)) if c2.at == c.at => c2.node.clone(),
+            Ok(_) => {
+                return Err(verify_failed(&format!(
+                    "'{prefix}' no longer holds decoded data"
+                )));
+            }
+            Err(e) => return Err(vf(e)),
+        };
+        *done.borrow_mut() = Some((out, again));
+        Ok(node)
+    };
+    edit_at(c.node, &payload, &inner_op, &inner_rp)?;
+    done.into_inner()
+        .ok_or_else(|| verify_failed("the outer layers were not re-encoded"))
 }
 
 /// A selection error on the re-encoded output is a verification failure.
@@ -194,9 +287,20 @@ fn vf(e: Diag) -> Diag {
     verify_failed(&format!("{}: {}", e.code, e.message))
 }
 
+fn jwt_unsupported() -> Diag {
+    unsupported(
+        "editing a JWT would invalidate its signature; decode the part, edit it, and re-sign it",
+    )
+}
+
 // ---------------------------------------------------------------- protobuf ops
 
-fn protobuf_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+fn protobuf_op(
+    root: &Node,
+    input: &[u8],
+    op: &Op,
+    rp: &Reparse<'_>,
+) -> Result<(Vec<u8>, Node), Diag> {
     match op {
         Op::Set(path, value) => {
             // Validates the path and gives the same errors as --get.
@@ -208,14 +312,14 @@ fn protobuf_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec
                 input,
                 &Edit::Field(&segs, &FieldAction::Replace(value)),
             )?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             let f = crate::select(&again, path).map_err(vf)?;
             if f.payload().as_deref() != Some(&expected[..])
                 || f.value.wire_name() != target.value.wire_name()
             {
                 return Err(verify_failed("the field does not hold the new value"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Del(path) => {
             crate::select(root, path)?;
@@ -223,11 +327,11 @@ fn protobuf_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec
             let (prefix, (num, _)) = (&segs[..segs.len() - 1], segs[segs.len() - 1]);
             let before = pb_count(root, prefix, num)?;
             let out = rebuild(root, input, &Edit::Field(&segs, &FieldAction::Delete))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             if pb_count(&again, prefix, num).map_err(vf)? + 1 != before {
                 return Err(verify_failed("the field was not removed"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Add(path, value) => {
             if path.trim_end().ends_with(']') {
@@ -265,13 +369,13 @@ fn protobuf_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec
                 input,
                 &Edit::Field(prefix, &FieldAction::Append(&bytes)),
             )?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             let f = crate::select(&again, &format!("{path}[{before}]")).map_err(vf)?;
             let wire_name = ["VARINT", "I64", "LEN"][wire as usize];
             if f.payload().as_deref() != Some(&payload[..]) || f.value.wire_name() != wire_name {
                 return Err(verify_failed("the new field does not hold the value"));
             }
-            Ok(out)
+            Ok((out, again))
         }
     }
 }
@@ -349,7 +453,12 @@ fn new_field_payload(num: u32, v: &NewValue) -> Result<(u64, Vec<u8>), Diag> {
 
 // ---------------------------------------------------------------- CBOR/MessagePack ops
 
-fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+fn values_op(
+    root: &Node,
+    input: &[u8],
+    op: &Op,
+    rp: &Reparse<'_>,
+) -> Result<(Vec<u8>, Node), Diag> {
     let codec = innermost(root).codec.clone();
     let vbuf = innermost_buf(root, input);
     let encode = |v: &NewValue, like: &ValueKind| match codec {
@@ -374,13 +483,13 @@ fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u
             let item = encode(value, &target.kind)?;
             let expected = parse_one(&codec, &item)?;
             let out = rebuild(root, input, &Edit::Splices(&[(target.range, item)]))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             check_codec(&again)?;
             let got = crate::select_value(&again, path).map_err(vf)?.untagged();
             if structural(got) != structural(&expected) {
                 return Err(verify_failed("the value does not hold the new item"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Del(path) => {
             crate::select_value(root, path)?;
@@ -405,12 +514,12 @@ fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u
                 .collect();
             splices.push((range, vec![]));
             let out = rebuild(root, input, &Edit::Splices(&splices))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             check_codec(&again)?;
             if container_len(container(&again, parent).map_err(vf)?) + 1 != count {
                 return Err(verify_failed("the item was not removed"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Add(path, value) => {
             let (parent, last) = split_last(path);
@@ -458,7 +567,7 @@ fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u
                 .collect();
             splices.push(([pos, pos], bytes));
             let out = rebuild(root, input, &Edit::Splices(&splices))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             check_codec(&again)?;
             let got = crate::select_value(&again, path).map_err(vf)?.untagged();
             if structural(got) != structural(&expected)
@@ -466,7 +575,7 @@ fn values_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u
             {
                 return Err(verify_failed("the new item is not where it should be"));
             }
-            Ok(out)
+            Ok((out, again))
         }
     }
 }
@@ -683,9 +792,9 @@ fn rebuild(node: &Node, buf: &[u8], edit: &Edit<'_>) -> Result<Vec<u8>, Diag> {
             let inner = rebuild(child, decoded, edit)?;
             encode_layer(&node.codec, buf, &inner)
         }
-        (Detail::Parts { .. }, _) if matches!(node.codec, Codec::Jwt { .. }) => Err(unsupported(
-            "editing a JWT would invalidate its signature; decode the part, edit it, and re-sign it",
-        )),
+        (Detail::Parts { .. }, _) if matches!(node.codec, Codec::Jwt { .. }) => {
+            Err(jwt_unsupported())
+        }
         _ => Err(unsupported(format!(
             "re-encoding a {} layer is not supported yet",
             node.codec.name()
@@ -900,7 +1009,7 @@ fn encode_payload(f: &Field, v: &NewValue) -> Result<Vec<u8>, Diag> {
 /// for its type; an added element is one complete element given as bytes.
 /// The length of every enclosing element (including encapsulating BIT/OCTET
 /// STRINGs) is rewritten.
-fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>, Diag> {
+fn der_op(root: &Node, input: &[u8], op: &Op, rp: &Reparse<'_>) -> Result<(Vec<u8>, Node), Diag> {
     let path = match op {
         Op::Set(p, _) | Op::Add(p, _) | Op::Del(p) => p,
     };
@@ -932,7 +1041,7 @@ fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>,
             elem.extend_from_slice(&der_length(content.len()));
             elem.extend_from_slice(&content);
             let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Replace(&elem)))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             need_der(&again)?;
             let got = crate::select_der(&again, path).map_err(vf)?;
             let bit_string = target.class == TagClass::Universal && target.number == 3;
@@ -946,18 +1055,18 @@ fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>,
             {
                 return Err(verify_failed("the element does not hold the new value"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Del(_) => {
             crate::select_der(root, path)?;
             let before = der_children(root, prefix)?.len();
             let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Delete))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             need_der(&again)?;
             if der_children(&again, prefix).map_err(vf)?.len() + 1 != before {
                 return Err(verify_failed("the element was not removed"));
             }
-            Ok(out)
+            Ok((out, again))
         }
         Op::Add(_, value) => {
             let before = der_children(root, prefix)?.len();
@@ -988,7 +1097,7 @@ fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>,
                 }
             };
             let out = rebuild(root, input, &Edit::Der(&segs, &DerAction::Insert(elem)))?;
-            let again = reparse(&out, opts)?;
+            let again = rp(&out)?;
             need_der(&again)?;
             let got = crate::select_der(&again, path).map_err(vf)?;
             if (got.class, got.number, got.constructed, got.payload())
@@ -1002,7 +1111,7 @@ fn der_op(root: &Node, input: &[u8], opts: &Options, op: &Op) -> Result<Vec<u8>,
             {
                 return Err(verify_failed("the new element is not where it should be"));
             }
-            Ok(out)
+            Ok((out, again))
         }
     }
 }
