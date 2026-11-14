@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "bytepeel": {
-      "command": "bytepeel",
-      "args": ["mcp"]
+      "command": "npx",
+      "args": ["-y", "bytepeel", "mcp"]
     }
   }
 }

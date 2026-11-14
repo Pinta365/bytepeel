@@ -19,8 +19,9 @@ output.
 ## How to call it
 
 If the bytepeel MCP tools (`peel`, `set`) are available, use them. Otherwise
-run the `bytepeel` CLI. If neither exists, tell the user to install it
-(`cargo install bytepeel`, or a binary from
+run the `bytepeel` CLI, or `npx bytepeel` (same arguments) when it isn't
+installed. If neither works, tell the user to install it (`npm install -g
+bytepeel`, `cargo install bytepeel`, or a binary from
 https://github.com/Pinta365/bytepeel/releases). If a call is denied or fails,
 say so and give the command to run. Decode by hand only if the user asks, and
 mark the result as unverified.

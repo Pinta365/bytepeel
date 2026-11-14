@@ -155,6 +155,9 @@ Other clients take the same command in their JSON config:
 { "mcpServers": { "bytepeel": { "command": "npx", "args": ["-y", "bytepeel", "mcp"] } } }
 ```
 
+It's listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
+`io.github.Pinta365/bytepeel`.
+
 It offers two tools:
 
 - **`peel`** decodes `input` (text) or `file` (a path), with optional `get`,
@@ -173,8 +176,8 @@ Errors come back as tool results with `isError: true` and the same
 The repo is also a Claude Code plugin marketplace. The `bytepeel` plugin
 bundles a skill that tells Claude to use bytepeel (rather than decoding bytes
 by eye or writing a script) whenever it meets hex, base64, PEM, JWTs or binary
-data, together with the MCP server above. It needs the `bytepeel` binary on
-your PATH.
+data, together with the MCP server above (started with `npx -y bytepeel
+mcp`, so it needs Node.js 18+ and nothing else).
 
 ```
 /plugin marketplace add Pinta365/bytepeel

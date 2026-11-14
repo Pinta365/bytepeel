@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "bytepeel",
-      "description": "Decode and edit hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and protobuf data with bytepeel instead of guessing bytes. Skill + MCP server; needs the bytepeel binary (cargo install bytepeel).",
+      "description": "Decode and edit hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and protobuf data with bytepeel instead of guessing bytes. Skill + MCP server (run with npx; needs Node.js 18+).",
       "source": "./plugins/bytepeel",
       "category": "development",
       "homepage": "https://github.com/Pinta365/bytepeel"
