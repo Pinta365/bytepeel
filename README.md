@@ -137,7 +137,7 @@ It offers two tools:
 - **`peel`** decodes `input` (text) or `file` (a path), with optional `get`,
   `format` (`json`, `tree`, or `raw`, which returns the payload as hex) and
   the CLI's options (`in`, `as`, `depth`, `alts`, `max_items`).
-- **`set`** applies `edits` (`[{"op":"set","path":"3.1","value":300}]`; `op`
+- **`set`** applies `edits` (`[{"op":"set","path":"3.1","value":"300"}]`; `op`
   can also be `add` or `del`) and returns the re-encoded data. Text comes back
   as text and binary data as hex. Pass `output_file` to write the result
   instead; an existing file is replaced only with `overwrite: true`.

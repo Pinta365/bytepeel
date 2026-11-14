@@ -454,7 +454,7 @@ dependencies; requests are read by a strict JSON parser in the CLI crate.
 | Tool | Arguments | Result text |
 |---|---|---|
 | `peel` | `input` (text) or `file` (path); `get`; `format`: `json` (default), `tree`, or `raw` (needs `get`; the payload as lowercase hex) | the CLI's output for the same options |
-| `set` | `input` or `file`; `edits`: `[{op, path, value}]`, applied in order. `op` is `set` (default), `add` or `del`. `value` is a JSON number, `true`/`false`/`null`, or a string in the CLI value syntax (`"\"text\""`, `"str:text"`, `"hex:0a0b"`, `"sint:-2"`); `del` takes none | `{"encoding":"text","data":..}` when the output is UTF-8, else `{"encoding":"hex","data":..}` |
+| `set` | `input` or `file`; `edits`: `[{op, path, value}]`, applied in order. `op` is `set` (default), `add` or `del`. `value` is a string in the CLI value syntax (`"42"`, `"true"`, `"null"`, `"\\"text\\""`, `"str:text"`, `"hex:0a0b"`, `"sint:-2"`; a JSON number, `true`/`false` or `null` is also accepted); `del` takes none | `{"encoding":"text","data":..}` when the output is UTF-8, else `{"encoding":"hex","data":..}` |
 
 Both tools also take the CLI options `in`, `as`, `depth`, `alts` and
 `max_items`, and `output_file` (with `overwrite`). With `output_file` the
