@@ -32,7 +32,6 @@
   "engines": {
     "node": ">=18"
   },
-  "private": true,
   "scripts": {
     "build": "sh build.sh",
     "test": "node --test test/*.test.js"
