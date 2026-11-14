@@ -4,7 +4,7 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org/); the public contract is the JSON
 schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-14)
 
 First release.
 
