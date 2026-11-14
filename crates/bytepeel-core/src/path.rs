@@ -104,6 +104,9 @@ pub(crate) fn field_children(f: &Field) -> Option<&[Field]> {
             AltKind::String {
                 decoded: Some(n), ..
             } => message_fields(n),
+            // An empty LEN field is an empty message (so `set` can add to it
+            // and a deleted last field verifies).
+            AltKind::Empty => Some(&[][..]),
             _ => None,
         }),
         _ => None,

@@ -429,7 +429,7 @@ in.
 - **Not editable yet:** JWT (editing would invalidate the signature),
   multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
   headers (`REENCODE_UNSUPPORTED`), data nested inside a CBOR/MessagePack
-  byte string (`--get` paths do not enter it), top-level items of a
+  byte string (`set` paths do not enter it, though `--get` paths do), top-level items of a
   multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.
 
 ## WebAssembly (`crates/bytepeel-wasm`, `npm/`)
@@ -527,7 +527,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `CHECKSUM_MISMATCH` | gzip CRC32, zlib Adler-32 or zstd content checksum does not match |
 | Warning / error: `TOO_MANY_ITEMS` | The input needs more protobuf fields, CBOR/MessagePack values and DER elements than `--max-items` allows (an error only with `--as`) |
 | Warning: `OUTPUT_TOO_LARGE` | Decompressed output would exceed 64 MiB, or the 256 MiB total budget for the input is exhausted |
-| `BAD_VALUE` | A `set` value is not in the value syntax (exit 2) |
+| `BAD_VALUE` | A `set` value is not in the value syntax (exit 2), or does not fit the target (e.g. an invalid OID or time, or a DER insert that is not one element; exit 1) |
 | `TYPE_MISMATCH` | A `set` value does not fit the field's wire type |
 | `VALUE_OUT_OF_RANGE` | A `set` integer or float does not fit the field |
 | `REENCODE_UNSUPPORTED` | A layer on the path cannot be re-encoded |

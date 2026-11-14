@@ -280,10 +280,10 @@ fn enrich_bytes(data: &[u8], alts: &mut Vec<Alt>, depth: usize, opts: &Options) 
     ) {
         return;
     }
-    let Some(n) = detect::nested_bytes(data, depth + 1, opts) else {
+    let Some(n) = detect::nested_field_bytes(data, depth + 1, opts) else {
         return;
     };
-    if n.codec == crate::Codec::Protobuf || n.confidence < BYTES_DECODED_MIN {
+    if n.confidence < BYTES_DECODED_MIN {
         return;
     }
     // The other alts are already normalized (they sum to 1); on the raw

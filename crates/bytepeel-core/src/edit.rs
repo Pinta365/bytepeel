@@ -87,7 +87,10 @@ pub fn parse_value(s: &str) -> Result<NewValue, Diag> {
             .map(NewValue::Str)
             .ok_or_else(|| bad_value(s));
     }
-    let digits = s.strip_prefix('-').unwrap_or(s);
+    let digits = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
         return s
             .parse::<i128>()
@@ -763,11 +766,14 @@ fn edit_fields(
             out.extend_from_slice(&payload);
         }
         (FieldValue::Group { fields: inner }, _) => {
-            // Start tag, fields, end tag: only the fields change.
-            let end_tag = varint::encode(u64::from(num) << 3 | 4).len();
+            // Start tag, fields, end tag: only the fields change. The end tag
+            // starts where the last inner field ends (it may be an overlong
+            // varint, so its length cannot be derived from the number).
+            let start = fs + tag_len;
+            let end = inner.last().map_or(start, |f| f.range[1]);
             out.extend_from_slice(tag);
-            edit_fields(buf, [fs + tag_len, fe - end_tag], inner, rest, action, out)?;
-            out.extend_from_slice(&buf[fe - end_tag..fe]);
+            edit_fields(buf, [start, end], inner, rest, action, out)?;
+            out.extend_from_slice(&buf[end..fe]);
         }
         (
             FieldValue::Len {
@@ -790,6 +796,12 @@ fn edit_fields(
                         decoded: Some(n), ..
                     } if message_fields(n).is_some() => {
                         inner = rebuild(n, &buf[ds..de], &Edit::Field(rest, action))?;
+                        entered = true;
+                    }
+                    // An empty LEN field is an empty message: fields can be
+                    // added to it.
+                    AltKind::Empty => {
+                        edit_fields(buf, [ds, de], &[], rest, action, &mut inner)?;
                         entered = true;
                     }
                     _ => continue,

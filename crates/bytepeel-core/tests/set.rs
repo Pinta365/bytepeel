@@ -841,3 +841,45 @@ fn der_delete_a_certificate_extension() {
         before
     );
 }
+
+// ------------------------------------------------------------ review fixes
+
+#[test]
+fn add_into_group_with_overlong_end_tag() {
+    // Group 1 { 2: 5 } whose end tag is the overlong varint `8c 00`.
+    let d = Options::default();
+    assert_eq!(
+        op(b"0b1005 8c00", &d, add("1.3", "42")).unwrap(),
+        // (the hex style keeps the original 3-byte token grouping)
+        b"0b1005 182a8c 00"
+    );
+    assert_eq!(
+        op(b"0b10050c", &d, add("1.3", "42")).unwrap(),
+        b"0b1005182a0c"
+    );
+}
+
+#[test]
+fn empty_submessage_takes_adds_and_last_delete_verifies() {
+    let d = Options::default();
+    // Deleting the only field leaves `0a 00`, an empty message.
+    assert_eq!(op(b"0a020801", &d, del("1.1")).unwrap(), b"0a00");
+    // Adding into an empty LEN field.
+    assert_eq!(op(b"0a00", &d, add("1.1", "5")).unwrap(), b"0a020805");
+}
+
+#[test]
+fn single_hex_token_grows_as_one_token() {
+    assert_eq!(set_s("0x089601", "1", "100000"), "0x08a08d06");
+    assert_eq!(
+        set_s("0x08 0x96 0x01", "1", "100000"),
+        "0x08 0xa0 0x8d 0x06"
+    );
+    assert_eq!(set_s("089601", "1", "100000"), "08a08d06");
+}
+
+#[test]
+fn plus_sign_integers() {
+    assert!(matches!(parse_value("+5").unwrap(), NewValue::Int(5)));
+    assert_eq!(set_s("089601", "1", "+5"), "0805");
+}

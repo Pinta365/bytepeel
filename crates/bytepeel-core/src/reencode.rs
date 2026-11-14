@@ -60,7 +60,7 @@ pub(crate) fn hex_like(orig: &str, bytes: &[u8]) -> String {
                 out.push_str("0x");
             }
             first_token = false;
-            let tok_end = (pos + st.tok_bytes).min(line_end);
+            let tok_end = pos.saturating_add(st.tok_bytes).min(line_end);
             for &b in &bytes[pos..tok_end] {
                 if st.upper {
                     let _ = write!(out, "{b:02X}");
@@ -117,7 +117,11 @@ fn hex_style(orig: &str) -> HexStyle {
 
     let any0x = tokens.iter().any(|t| t.3);
     let all0x = !tokens.is_empty() && tokens.iter().all(|t| t.3);
-    let tok_bytes = tokens.first().map_or(1, |t| (t.2 / 2).max(1));
+    // A single token (`0x089601`, `089601`) stays a single token at any length.
+    let tok_bytes = match tokens.as_slice() {
+        [_] => usize::MAX,
+        _ => tokens.first().map_or(1, |t| (t.2 / 2).max(1)),
+    };
 
     let mut sep = String::new();
     for w in tokens.windows(2) {

@@ -188,7 +188,7 @@ fn detect(buf: &[u8], depth: usize, opts: &Options, mode: Mode) -> Node {
             return text_leaf(t, 1.0);
         }
     }
-    binary_node(buf, depth, opts)
+    binary_node(buf, depth, opts, true)
 }
 
 /// A text layer (hex/base64/PEM) inside already-decoded data, if one is
@@ -220,6 +220,20 @@ pub(crate) fn nested_bytes(buf: &[u8], depth: usize, opts: &Options) -> Option<N
         // stream, an unsupported format) is kept so the warning is reported.
         Codec::Bytes if !n.warnings.is_empty() => Some(n),
         Codec::Utf8 | Codec::Bytes => None,
+        _ => Some(n),
+    }
+}
+
+/// Nested detection of a protobuf LEN field's raw bytes: binary formats only
+/// (no text layers, no protobuf). `None` when nothing more specific than
+/// bytes is found.
+pub(crate) fn nested_field_bytes(buf: &[u8], depth: usize, opts: &Options) -> Option<Node> {
+    if depth >= opts.depth {
+        return None;
+    }
+    let n = binary_node(buf, depth, opts, false);
+    match n.codec {
+        Codec::Bytes if n.warnings.is_empty() => None,
         _ => Some(n),
     }
 }
@@ -459,7 +473,10 @@ fn jwt_node(t: &str, depth: usize, opts: &Options) -> Option<Node> {
     })
 }
 
-fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
+/// Detect a binary buffer. `protobuf: false` leaves out the protobuf
+/// candidate (for a protobuf LEN field's bytes, which `classify_len` already
+/// parsed as a message: parsing them again would recurse twice per level).
+fn binary_node(buf: &[u8], depth: usize, opts: &Options, protobuf: bool) -> Node {
     if buf.is_empty() {
         return bytes_leaf(buf, 1.0, vec![]);
     }
@@ -519,8 +536,9 @@ fn binary_node(buf: &[u8], depth: usize, opts: &Options) -> Node {
     let c = msgpack::detect(buf)
         .map(|(items, conf, tk)| (Codec::Msgpack, conf, tk, Payload::Values(items)));
     attempt(&mut cands, c);
-    let c = protobuf::parse_message(buf, 0, buf.len(), depth, opts)
-        .ok()
+    let c = protobuf
+        .then(|| protobuf::parse_message(buf, 0, buf.len(), depth, opts).ok())
+        .flatten()
         .map(|(fields, st)| (protobuf::plausibility(&st, buf.len()), fields))
         .filter(|(conf, _)| *conf >= MESSAGE_THRESHOLD)
         .map(|(conf, fields)| (Codec::Protobuf, conf, false, Payload::Fields(fields)));

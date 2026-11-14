@@ -75,30 +75,46 @@ pub(crate) enum Outcome {
 /// `None` when `buf` is not a recognized compressed stream.
 pub(crate) fn decompress(buf: &[u8]) -> Option<Outcome> {
     let kind = sniff(buf)?;
+    // The decoders write into `out`, so a stream that fails (too large,
+    // corrupt, bad checksum) is still charged for the output it produced.
+    let mut out = Vec::new();
     let res = match kind {
-        Magic::Gzip => gzip(buf),
-        Magic::Zstd => zstd(buf),
-        Magic::Zlib { common } => match zlib(buf) {
+        Magic::Gzip => gzip(buf, &mut out),
+        Magic::Zstd => zstd(buf, &mut out),
+        Magic::Zlib { common } => match zlib(buf, &mut out) {
             Ok(z) => Ok(z),
             // Two header bytes are a weak signal: only a common header (78 01,
             // 78 5e, 78 9c, 78 da) is reported as broken zlib.
             Err(e) if common => Err(e),
-            Err(_) => return None,
+            Err(_) => {
+                charge(out.len());
+                return None;
+            }
         },
     };
     Some(match res {
         Ok(i) => {
-            #[cfg(any(feature = "deflate", feature = "zstd"))]
-            REMAINING.with(|r| {
-                // `usize::MAX` means no peel is running: nothing to charge.
-                if r.get() != usize::MAX {
-                    r.set(r.get().saturating_sub(i.bytes.len()));
-                }
-            });
+            charge(i.bytes.len());
             Outcome::Decoded(i)
         }
-        Err(d) => Outcome::Failed(d),
+        Err(d) => {
+            charge(out.len());
+            Outcome::Failed(d)
+        }
     })
+}
+
+/// Draw `n` decompressed bytes from the current peel's budget.
+fn charge(n: usize) {
+    #[cfg(any(feature = "deflate", feature = "zstd"))]
+    REMAINING.with(|r| {
+        // `usize::MAX` means no peel is running: nothing to charge.
+        if r.get() != usize::MAX {
+            r.set(r.get().saturating_sub(n));
+        }
+    });
+    #[cfg(not(any(feature = "deflate", feature = "zstd")))]
+    let _ = n;
 }
 
 #[derive(Clone, Copy)]
@@ -156,8 +172,7 @@ fn trailing(kind: &str, n: usize, at: usize) -> Diag {
 // ---------------------------------------------------------------- gzip
 
 #[cfg(feature = "deflate")]
-fn gzip(buf: &[u8]) -> Result<Inflated, Diag> {
-    let mut out = Vec::new();
+fn gzip(buf: &[u8], out: &mut Vec<u8>) -> Result<Inflated, Diag> {
     let mut name = None;
     let mut warnings = Vec::new();
     let mut pos = 0;
@@ -167,7 +182,7 @@ fn gzip(buf: &[u8]) -> Result<Inflated, Diag> {
             name = fname;
         }
         let start = out.len();
-        let used = inflate(&buf[body..], false, &mut out, "gzip", body)?;
+        let used = inflate(&buf[body..], false, out, "gzip", body)?;
         let t = body + used;
         if buf.len() - t < 8 {
             return Err(corrupt("gzip", "missing CRC32/ISIZE trailer", Some(t)));
@@ -201,7 +216,7 @@ fn gzip(buf: &[u8]) -> Result<Inflated, Diag> {
     }
     Ok(Inflated {
         kind: "gzip",
-        bytes: out,
+        bytes: std::mem::take(out),
         name,
         warnings,
     })
@@ -251,16 +266,15 @@ fn gzip_header(buf: &[u8], pos: usize) -> Result<(usize, Option<String>), Diag> 
 }
 
 #[cfg(feature = "deflate")]
-fn zlib(buf: &[u8]) -> Result<Inflated, Diag> {
-    let mut out = Vec::new();
-    let used = inflate(buf, true, &mut out, "zlib", 0)?;
+fn zlib(buf: &[u8], out: &mut Vec<u8>) -> Result<Inflated, Diag> {
+    let used = inflate(buf, true, out, "zlib", 0)?;
     let mut warnings = Vec::new();
     if used < buf.len() {
         warnings.push(trailing("zlib", buf.len() - used, used));
     }
     Ok(Inflated {
         kind: "zlib",
-        bytes: out,
+        bytes: std::mem::take(out),
         name: None,
         warnings,
     })
@@ -328,23 +342,22 @@ fn inflate(
 }
 
 #[cfg(not(feature = "deflate"))]
-fn gzip(_: &[u8]) -> Result<Inflated, Diag> {
+fn gzip(_: &[u8], _: &mut Vec<u8>) -> Result<Inflated, Diag> {
     Err(disabled("gzip", "deflate"))
 }
 
 #[cfg(not(feature = "deflate"))]
-fn zlib(_: &[u8]) -> Result<Inflated, Diag> {
+fn zlib(_: &[u8], _: &mut Vec<u8>) -> Result<Inflated, Diag> {
     Err(disabled("zlib", "deflate"))
 }
 
 // ---------------------------------------------------------------- zstd
 
 #[cfg(feature = "zstd")]
-fn zstd(buf: &[u8]) -> Result<Inflated, Diag> {
+fn zstd(buf: &[u8], out: &mut Vec<u8>) -> Result<Inflated, Diag> {
     use ruzstd::decoding::StreamingDecoder;
     use std::io::Read;
 
-    let mut out = Vec::new();
     let mut warnings = Vec::new();
     let mut src: &[u8] = buf;
     loop {
@@ -353,7 +366,7 @@ fn zstd(buf: &[u8]) -> Result<Inflated, Diag> {
         let room = cap().saturating_sub(out.len()) as u64;
         let n = (&mut dec)
             .take(room + 1)
-            .read_to_end(&mut out)
+            .read_to_end(out)
             .map_err(|e| corrupt("zstd", e, Some(at)))?;
         if n as u64 > room {
             return Err(too_large("zstd"));
@@ -380,14 +393,14 @@ fn zstd(buf: &[u8]) -> Result<Inflated, Diag> {
     }
     Ok(Inflated {
         kind: "zstd",
-        bytes: out,
+        bytes: std::mem::take(out),
         name: None,
         warnings,
     })
 }
 
 #[cfg(not(feature = "zstd"))]
-fn zstd(_: &[u8]) -> Result<Inflated, Diag> {
+fn zstd(_: &[u8], _: &mut Vec<u8>) -> Result<Inflated, Diag> {
     Err(disabled("zstd", "zstd"))
 }
 
@@ -566,6 +579,18 @@ mod tests {
         }
         // Outside any scope there is no total budget.
         assert_eq!(REMAINING.get(), usize::MAX);
+    }
+
+    #[test]
+    fn failed_streams_are_charged_too() {
+        // A stream with a broken CRC still inflated its output: that work
+        // counts against the budget, or many failing streams escape it.
+        let mut gz = include_bytes!("../tests/fixtures/msg.bin.gz").to_vec();
+        let at = gz.len() - 8;
+        gz[at] ^= 0xff;
+        let _scope = BudgetScope::with(1000);
+        assert!(matches!(decompress(&gz), Some(Outcome::Failed(_))));
+        assert!(REMAINING.get() < 1000, "{}", REMAINING.get());
     }
 
     #[test]
