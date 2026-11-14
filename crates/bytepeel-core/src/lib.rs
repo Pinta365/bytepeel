@@ -40,7 +40,8 @@ pub mod varint;
 pub use edit::{NewValue, Op, edit, parse_value, set};
 pub use error::Diag;
 pub use node::{
-    Alphabet, Alt, AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass,
+    Alphabet, Alt, AltKind, Asn1, Asn1Value, BYTES_HEAD, Codec, Detail, Field, FieldValue, Node,
+    TagClass,
 };
 pub use path::{JwtPick, is_der, is_jwt, is_values, select, select_der, select_jwt, select_value};
 pub use text::{B64, decode_b64, decode_hex};

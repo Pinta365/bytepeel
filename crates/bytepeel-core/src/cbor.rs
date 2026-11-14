@@ -77,10 +77,14 @@ pub(crate) fn detect(buf: &[u8]) -> Option<(Vec<Value>, f64, bool)> {
         return None;
     }
     let self_describe = buf.len() >= 3 && buf[0] == 0xd9 && buf[1] == 0xd9 && buf[2] == 0xf7;
-    let items = parse_sequence(buf).ok()?;
-    if items.len() != 1 {
+    // Exactly one item: parse it and stop, rather than parsing the whole
+    // buffer as a sequence (millions of one-byte items for zeros) to count.
+    let mut pos = 0;
+    let item = parse_one(buf, &mut pos, 0).ok()?;
+    if pos != buf.len() {
         return None;
     }
+    let items = vec![item];
     if self_describe {
         let text_keys = value::keys_all_text(&items);
         return Some((items, 0.99, text_keys));

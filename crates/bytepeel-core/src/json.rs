@@ -10,7 +10,8 @@ use crate::value::{self, Value, ValueKind};
 use crate::{Diag, der, text, varint};
 
 const TEXT_CAP: usize = 1024;
-const HEX_CAP: usize = 64;
+/// A bytes leaf keeps exactly what its `hex` shows.
+const HEX_CAP: usize = crate::node::BYTES_HEAD;
 const PACKED_CAP: usize = 64;
 
 pub fn node_to_json(n: &Node) -> String {
@@ -181,12 +182,18 @@ fn text_kv(o: &mut String, key: &str, text: &str) {
 }
 
 fn hex_kv(o: &mut String, bytes: &[u8]) {
+    hex_head_kv(o, bytes, bytes.len());
+}
+
+/// `"hex"` of the first `HEX_CAP` bytes of `head`, where `len` is the length
+/// of the whole data (`head` may be just its start).
+fn hex_head_kv(o: &mut String, head: &[u8], len: usize) {
     o.push_str(",\"hex\":\"");
-    for b in bytes.iter().take(HEX_CAP) {
+    for b in head.iter().take(HEX_CAP) {
         let _ = write!(o, "{b:02x}");
     }
     o.push('"');
-    if bytes.len() > HEX_CAP {
+    if len > HEX_CAP {
         o.push_str(",\"truncated\":true");
     }
 }
@@ -318,9 +325,9 @@ fn node(o: &mut String, n: &Node) {
             }
         }
         Detail::Text { text } => text_kv(o, "text", text),
-        Detail::Bytes { bytes } => {
-            let _ = write!(o, ",\"len\":{}", bytes.len());
-            hex_kv(o, bytes);
+        Detail::Bytes { len, head } => {
+            let _ = write!(o, ",\"len\":{len}");
+            hex_head_kv(o, head, *len);
         }
     }
     if !n.warnings.is_empty() {

@@ -647,7 +647,8 @@ fn bytes_leaf(buf: &[u8], conf: f64, warnings: Vec<Diag>) -> Node {
         range: [0, buf.len()],
         confidence: conf,
         detail: Detail::Bytes {
-            bytes: buf.to_vec(),
+            len: buf.len(),
+            head: buf[..buf.len().min(crate::node::BYTES_HEAD)].to_vec(),
         },
         warnings,
     }

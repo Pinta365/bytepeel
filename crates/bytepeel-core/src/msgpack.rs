@@ -63,10 +63,14 @@ pub(crate) fn detect(buf: &[u8]) -> Option<(Vec<Value>, f64, bool)> {
     if buf.len() < 2 {
         return None;
     }
-    let items = parse_sequence(buf).ok()?;
-    if items.len() != 1 {
+    // Exactly one item: parse it and stop, rather than parsing the whole
+    // buffer as a sequence (millions of one-byte items for zeros) to count.
+    let mut pos = 0;
+    let item = parse_one(buf, &mut pos, 0).ok()?;
+    if pos != buf.len() {
         return None;
     }
+    let items = vec![item];
     match &items[0].kind {
         ValueKind::Map(_) | ValueKind::Array(_) => {
             let conf = value::structure_confidence(&items, 127, 31);

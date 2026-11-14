@@ -970,7 +970,7 @@ fn jwt_alg_none_has_empty_signature() {
     assert_eq!(parts[2].range[0], parts[2].range[1]);
     let c = child(&parts[2]);
     assert_eq!(c.codec, Codec::Bytes);
-    assert!(matches!(&c.detail, Detail::Bytes { bytes } if bytes.is_empty()));
+    assert!(matches!(&c.detail, Detail::Bytes { len: 0, head } if head.is_empty()));
 }
 
 #[test]
@@ -1806,6 +1806,38 @@ fn corrupt_stream_in_byte_string_keeps_its_warning() {
     let n = auto(&cbor);
     let j = to_json(&n);
     assert!(j.contains(r#""code":"CHECKSUM_MISMATCH""#), "{j}");
+}
+
+// ------------------------------------------------------------ large buffers
+
+#[test]
+fn large_zero_buffer_is_rejected_quickly() {
+    // Zeros are a sequence of one-byte CBOR/MessagePack items. Detection must
+    // parse one item and stop, not build millions of values to count them
+    // (64 MiB took ~5 s and gigabytes in a debug build before; now ~ms).
+    let zeros = vec![0u8; 64 << 20];
+    let t = std::time::Instant::now();
+    let n = auto(&zeros);
+    assert_eq!(n.codec, Codec::Bytes);
+    assert!(t.elapsed().as_millis() < 1000, "took {:?}", t.elapsed());
+}
+
+#[test]
+fn bytes_leaf_keeps_only_a_preview() {
+    let data: Vec<u8> = (0..200u8).map(|i| i.wrapping_mul(37) | 0x80).collect();
+    let n = auto(&data);
+    match &n.detail {
+        Detail::Bytes { len, head } => {
+            assert_eq!(*len, 200);
+            assert_eq!(head[..], data[..BYTES_HEAD]);
+        }
+        d => panic!("{d:?}"),
+    }
+    let j = to_json(&n);
+    assert!(
+        j.contains(r#""len":200"#) && j.contains(r#""truncated":true"#),
+        "{j}"
+    );
 }
 
 #[test]

@@ -224,9 +224,9 @@ fn node(o: &mut String, n: &Node, d: usize) {
             quote(o, text, 80);
             o.push('\n');
         }
-        Detail::Bytes { bytes } => {
-            let _ = write!(o, " len={} ", bytes.len());
-            hex_preview(o, bytes);
+        Detail::Bytes { len, head } => {
+            let _ = write!(o, " len={len} ");
+            hex_preview(o, head); // 32 of the BYTES_HEAD bytes
             o.push('\n');
         }
     }

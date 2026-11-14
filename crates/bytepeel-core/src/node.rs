@@ -94,6 +94,9 @@ pub struct Node {
     pub warnings: Vec<Diag>,
 }
 
+/// Bytes kept in a [`Detail::Bytes`] leaf for its preview.
+pub const BYTES_HEAD: usize = 64;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Detail {
     /// A text encoding (hex/base64/PEM); `child` describes the decoded bytes.
@@ -115,8 +118,16 @@ pub enum Detail {
     },
     /// Printable UTF-8 text.
     Text { text: String },
-    /// Opaque bytes (nothing more specific was found, or the format is not yet supported).
-    Bytes { bytes: Vec<u8> },
+    /// Opaque bytes (nothing more specific was found, or the format is not
+    /// yet supported). Only the first [`BYTES_HEAD`] bytes are kept, for the
+    /// preview: the full bytes are the parent's (the input, a layer's
+    /// `decoded`, a field's or value's data), so a large leaf is not stored twice.
+    Bytes {
+        /// Length of the whole leaf.
+        len: usize,
+        /// Its first `min(len, BYTES_HEAD)` bytes.
+        head: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
