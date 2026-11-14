@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bytepeel",
+  "description": "bytepeel: decode and edit encoded and binary data",
+  "owner": { "name": "Pinta365" },
+  "plugins": [
+    {
+      "name": "bytepeel",
+      "description": "Decode and edit hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and protobuf data with bytepeel instead of guessing bytes. Skill + MCP server; needs the bytepeel binary (cargo install bytepeel).",
+      "source": "./plugins/bytepeel",
+      "category": "development",
+      "homepage": "https://github.com/Pinta365/bytepeel"
+    }
+  ]
+}

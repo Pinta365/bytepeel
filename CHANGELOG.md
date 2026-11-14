@@ -4,6 +4,12 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org/); the public contract is the JSON
 schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Unreleased
+
+- A Claude Code plugin (`/plugin marketplace add Pinta365/bytepeel`) with an
+  agent skill that tells the agent when and how to use bytepeel, and the MCP
+  server.
+
 ## 0.1.0 (2026-11-14)
 
 First release.

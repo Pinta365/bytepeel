@@ -157,6 +157,23 @@ It offers two tools:
 Errors come back as tool results with `isError: true` and the same
 `{"error":{...}}` JSON the CLI prints.
 
+## Claude Code plugin and agent skill
+
+The repo is also a Claude Code plugin marketplace. The `bytepeel` plugin
+bundles a skill that tells Claude to use bytepeel (rather than decoding bytes
+by eye or writing a script) whenever it meets hex, base64, PEM, JWTs or binary
+data, together with the MCP server above. It needs the `bytepeel` binary on
+your PATH.
+
+```
+/plugin marketplace add Pinta365/bytepeel
+/plugin install bytepeel@bytepeel
+```
+
+The skill is a plain [`SKILL.md`](plugins/bytepeel/skills/bytepeel/SKILL.md)
+folder, so other agents that read Agent Skills can use it too: copy
+`plugins/bytepeel/skills/bytepeel/` into their skills directory.
+
 ## JavaScript / WebAssembly
 
 `npm/` is a WebAssembly build with a small JS wrapper (Node, Deno, Bun,

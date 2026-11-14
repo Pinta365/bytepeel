@@ -1,0 +1,10 @@
+{
+  "name": "bytepeel",
+  "description": "Decode and edit hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and protobuf data with bytepeel instead of guessing bytes. A skill that tells Claude when and how to use it, plus the bytepeel MCP server (needs the bytepeel binary on PATH).",
+  "version": "0.1.0",
+  "author": { "name": "Pinta365" },
+  "homepage": "https://github.com/Pinta365/bytepeel",
+  "repository": "https://github.com/Pinta365/bytepeel",
+  "license": "MIT",
+  "keywords": ["decoder", "protobuf", "asn1", "cbor", "jwt", "base64", "mcp"]
+}
