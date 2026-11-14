@@ -1,8 +1,26 @@
-# bytepeel (WebAssembly)
+# bytepeel
 
-Peel layers of encoding off binary data, and edit it in place, from
-JavaScript: hex, xxd/hexdump dumps, base64, PEM (incl. bundles), JWT,
-gzip/zlib/zstd, DER/ASN.1, CBOR, MessagePack and schemaless protobuf.
+Peel layers of encoding off binary data, and edit it in place: hex,
+xxd/hexdump dumps, base64, PEM (incl. bundles), JWT, gzip/zlib/zstd,
+DER/ASN.1, CBOR, MessagePack and schemaless protobuf.
+
+This package is two things:
+
+- **The `bytepeel` command** (the CLI and its MCP server), run from the
+  native binary for your platform, which npm installs as an optional
+  dependency (Linux x64/arm64, macOS x64/arm64, Windows x64):
+
+  ```sh
+  echo 1a03089601 | npx bytepeel --format tree
+  npx -y bytepeel mcp          # MCP server on stdio, for agents
+  ```
+
+  See the [main README](https://github.com/Pinta365/bytepeel#readme) for the
+  CLI and the MCP tools.
+- **A JavaScript library**, documented below. (The JSR package is the
+  library only.)
+
+## Library
 
 One `bytepeel.wasm` with no imports and no JS dependencies; runs in Node
 (≥18), Deno, Bun and browsers.

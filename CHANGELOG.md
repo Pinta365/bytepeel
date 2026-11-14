@@ -4,8 +4,13 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org/); the public contract is the JSON
 schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
-## Unreleased
+## 0.1.1 (2026-11-15)
 
+- `npx bytepeel` and `npx -y bytepeel mcp`: the npm package now has a
+  `bytepeel` command that runs the native CLI from a per-platform package
+  (`bytepeel-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`,
+  `-win32-x64`), so the CLI and MCP server need no Rust toolchain.
+- An MCP Registry entry (`server.json`, `io.github.Pinta365/bytepeel`).
 - A Claude Code plugin (`/plugin marketplace add Pinta365/bytepeel`) with an
   agent skill that tells the agent when and how to use bytepeel, and the MCP
   server.

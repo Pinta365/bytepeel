@@ -3,3 +3,4 @@ LICENSE
 node_modules/
 *.tgz
 bytepeel_wasm.js
+platforms/

@@ -1,7 +1,7 @@
 {
   "name": "bytepeel",
-  "version": "0.1.0",
-  "description": "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1, CBOR, MessagePack) and edit it in place. WebAssembly, no dependencies.",
+  "version": "0.1.1",
+  "description": "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1, CBOR, MessagePack) and edit it in place. A WebAssembly library plus the bytepeel CLI and MCP server (npx bytepeel mcp).",
   "license": "MIT",
   "author": "Pinta365",
   "repository": {
@@ -14,6 +14,9 @@
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
+  "bin": {
+    "bytepeel": "bin/bytepeel.js"
+  },
   "exports": {
     ".": {
       "types": "./index.d.ts",
@@ -25,12 +28,20 @@
     "index.js",
     "index.d.ts",
     "bytepeel.wasm",
+    "bin/bytepeel.js",
     "README.md",
     "LICENSE"
   ],
   "sideEffects": false,
   "engines": {
     "node": ">=18"
+  },
+  "optionalDependencies": {
+    "bytepeel-darwin-arm64": "0.1.1",
+    "bytepeel-darwin-x64": "0.1.1",
+    "bytepeel-linux-arm64": "0.1.1",
+    "bytepeel-linux-x64": "0.1.1",
+    "bytepeel-win32-x64": "0.1.1"
   },
   "scripts": {
     "build": "sh build.sh",
@@ -45,6 +56,9 @@
     "base64",
     "jwt",
     "decoder",
-    "wasm"
-  ]
+    "wasm",
+    "cli",
+    "mcp"
+  ],
+  "mcpName": "io.github.Pinta365/bytepeel"
 }

@@ -7,7 +7,8 @@ Cargo workspace:
   future codec dependency goes behind an optional feature).
 - `crates/bytepeel`: a thin CLI with hand-rolled argument parsing (no clap).
 - `crates/bytepeel-wasm`: the WebAssembly build (minimal C ABI, no
-  wasm-bindgen); `npm/` wraps it for JavaScript.
+  wasm-bindgen); `npm/` wraps it for JavaScript and also ships the native
+  CLI as the `bytepeel` command (per-platform packages, `npm/platforms.mjs`).
 - `plugins/bytepeel`: the Claude Code plugin (agent skill + MCP config);
   `.claude-plugin/marketplace.json` makes the repo its marketplace. Keep the
   skill in step with the CLI's flags, paths and error codes.

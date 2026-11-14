@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Pinta365/bytepeel",
+  "title": "bytepeel",
+  "description": "Decode and edit hex, base64, PEM, JWT, gzip, DER, CBOR, MessagePack and protobuf data byte-exactly.",
+  "repository": {
+    "url": "https://github.com/Pinta365/bytepeel",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Pinta365/bytepeel",
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "bytepeel",
+      "version": "0.1.1",
+      "runtimeHint": "npx",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "mcp" }]
+    }
+  ]
+}

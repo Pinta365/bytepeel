@@ -490,6 +490,12 @@ bytes]`: status 0 is the output, 1 is `{"error":{...}}` JSON; free it with
 with typed edit values (strings are text, numbers are numbers) and
 `BytepeelError`. Build: `npm/build.sh` (`--profile wasm`: release, size-optimized).
 
+The npm package also has a `bytepeel` command (`npm/bin/bytepeel.js`) that
+runs the native CLI, unchanged, from an optional per-platform dependency
+(`bytepeel-{linux,darwin}-{x64,arm64}`, `bytepeel-win32-x64`), passing
+arguments, stdio and the exit code through. `npm/platforms.mjs` builds those
+packages from a GitHub release's archives.
+
 ## Heuristics (tunable; each has a test)
 
 | Signal | Effect |

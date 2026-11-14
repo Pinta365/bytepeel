@@ -27,10 +27,12 @@ base64(std,padded) [0..32] conf=0.85 -> 24 bytes
 ## Install
 
 ```sh
-cargo install bytepeel             # the CLI and MCP server (Rust 1.87+)
+npx bytepeel --help                # the CLI and MCP server, no install needed
+npm install -g bytepeel            # or install it (Node 18+)
+cargo install bytepeel             # or build it (Rust 1.87+)
 ```
 
-Prebuilt binaries for Linux (static), macOS and Windows are attached to each
+The npm package runs the same native binary as the others. Prebuilt binaries for Linux (static), macOS and Windows are attached to each
 [GitHub release](https://github.com/pinta365/bytepeel/releases). For
 JavaScript, use `npm install bytepeel` or `deno add jsr:@pinta365/bytepeel`
 (see [npm/README.md](npm/README.md)), and for Rust, the
@@ -141,10 +143,16 @@ heuristics and error codes.
 
 `bytepeel mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
 server on stdio, so an agent can call bytepeel as a tool. It's built into the
-same binary and needs no runtime. For example, in Claude Code:
+same binary. For example, in Claude Code:
 
 ```sh
-claude mcp add bytepeel -- bytepeel mcp
+claude mcp add bytepeel -- npx -y bytepeel mcp     # or: -- bytepeel mcp, if installed
+```
+
+Other clients take the same command in their JSON config:
+
+```json
+{ "mcpServers": { "bytepeel": { "command": "npx", "args": ["-y", "bytepeel", "mcp"] } } }
 ```
 
 It offers two tools:
