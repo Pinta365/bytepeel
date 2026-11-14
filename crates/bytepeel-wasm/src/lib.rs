@@ -28,7 +28,7 @@ fn bad(msg: impl Into<String>) -> Diag {
 }
 
 /// Options as `key=value` pairs separated by `\n`: `in` (auto|hex|base64|raw),
-/// `as` (protobuf|der|cbor|msgpack|text|bytes), `depth`, `alts`.
+/// `as` (protobuf|der|cbor|msgpack|text|bytes), `depth`, `alts`, `max_items`.
 pub fn parse_opts(s: &str) -> Result<Options, Diag> {
     let mut o = Options::default();
     for line in s.split('\n').filter(|l| !l.is_empty()) {

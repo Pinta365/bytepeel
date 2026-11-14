@@ -241,7 +241,7 @@ discarded: the blocks decoded so far are kept and the break becomes a warning
 on the resulting node — `PEM_UNTERMINATED` (offset at the cut-off `BEGIN`) or
 the base64 error. The text from the broken block onward is excluded from the
 `TRAILING_DATA` count. If the *first* block is broken, nothing is recognised
-and the input stays text (as before).
+and the input stays text.
 
 ### Number encoding
 
@@ -436,7 +436,7 @@ in.
   CBOR array `97` becomes `98 18`, a 15-entry MessagePack fixmap becomes
   `map16`). Indefinite CBOR containers have no count: items go before the
   break byte.
-- **Not editable yet:** JWT, including data inside a JWT part (editing
+- **Not editable:** JWT, including data inside a JWT part (editing
   would invalidate the signature),
   multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
   headers (`REENCODE_UNSUPPORTED`), top-level items of a
@@ -574,7 +574,7 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 | Warning: `NONCANONICAL_DER` | Valid BER but not DER (non-minimal length or integer) |
 | Warning: `UNSUPPORTED_FORMAT` | Recognized by magic bytes; decoder not implemented, or its Cargo feature is off |
 
-## Known limitations (MVP)
+## Known limitations
 
 - A protobuf message whose bytes are all printable (possible when every tag is
   for field 4 or higher and every length is ≥32) is reported as text. Use
@@ -588,7 +588,3 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
   `--as cbor` / `--as msgpack`. JSON floats print `-0.0` as `0`.
 - DER: only OIDs in a built-in table (~175) are named; BER indefinite
   lengths and constructed strings are not supported.
-
-## Roadmap
-
-1. Publishing (crates.io, npm) when the project goes public

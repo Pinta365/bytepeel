@@ -36,7 +36,7 @@ JavaScript, use `npm install bytepeel` or `deno add jsr:@pinta365/bytepeel`
 (see [npm/README.md](npm/README.md)), and for Rust, the
 [`bytepeel-core`](https://crates.io/crates/bytepeel-core) crate.
 
-## Supported today
+## Supported formats
 
 | Layer | Notes |
 |---|---|
@@ -46,12 +46,12 @@ JavaScript, use `npm install bytepeel` or `deno add jsr:@pinta365/bytepeel`
 | PEM | any label; RFC 1421 headers skipped; multiple blocks (chain, key + cert) become a `bundle` of per-block layers |
 | JWT | JWS (3 parts) and JWE (5 parts); each part decoded, and `exp`/`nbf`/`iat` rendered as ISO-8601 UTC |
 | protobuf | schemaless; groups, negative varints, fixed32/64 as int and float |
-| DER / ASN.1 | X.509, PKCS, CMS; ~85 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
+| DER / ASN.1 | X.509, PKCS, CMS; ~175 named OIDs, ISO times, any-width integers, DER nested in BIT/OCTET STRINGs decoded in place |
 | CBOR | RFC 8949: maps, arrays, tags (epoch → ISO-8601, bignums, uuid), indefinite lengths, half/single/double floats; `--as cbor` for scalars |
 | MessagePack | maps, arrays, str/bin, int64/uint64, float32/64, ext (timestamp type -1 → ISO-8601 with nanoseconds); `--as msgpack` for scalars |
 | utf8 / bytes | leaves |
 | gzip, zlib, zstd | checksum-verified, multi-member/frame, 64 MiB output cap (optional core features `deflate` and `zstd`, on in the CLI) |
-| PNG, zip | recognized by magic bytes; decoders on the roadmap |
+| PNG, zip | recognized by magic bytes (not decoded) |
 
 ## Usage
 
@@ -131,8 +131,8 @@ $ echo "$TOKEN" | bytepeel --get payload.sub --format raw   # a JWT claim
 1234567890
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,
-error codes and roadmap.
+See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, paths,
+heuristics and error codes.
 
 ## MCP server
 

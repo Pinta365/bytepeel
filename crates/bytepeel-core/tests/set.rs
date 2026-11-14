@@ -232,7 +232,7 @@ fn errors() {
         code(b"089601", "1", "18446744073709551616"),
         "VALUE_OUT_OF_RANGE"
     );
-    // DER is not editable yet.
+    // All-digit text is a number, not hex: there is no message to edit.
     assert_eq!(code(b"3003020105", "0", "1"), "PATH_NOT_MESSAGE");
 }
 
@@ -841,7 +841,7 @@ fn der_delete_a_certificate_extension() {
     );
 }
 
-// ------------------------------------------------------------ review fixes
+// ------------------------------------------------------------ protobuf edge cases
 
 #[test]
 fn add_into_group_with_overlong_end_tag() {

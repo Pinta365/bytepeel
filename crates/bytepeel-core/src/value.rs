@@ -1,4 +1,4 @@
-//! A codec-neutral value tree, shared by CBOR (RFC 8949) and, later,
+//! A codec-neutral value tree, shared by CBOR (RFC 8949) and
 //! MessagePack. Values carry byte ranges like the rest of the tree.
 
 use crate::node::Node;
@@ -83,10 +83,6 @@ pub(crate) fn type_name(k: &ValueKind) -> &'static str {
     }
 }
 
-/// Every map key anywhere in `values` is a text string.
-///
-/// Shared by CBOR and MessagePack detection (and available to the candidate
-/// ranking). CBOR tags are followed.
 /// Auto-detection confidence for a structurally valid CBOR/MessagePack tree.
 ///
 /// Maps are the strong signal: 0.9 when every key is text or a small integer
@@ -114,6 +110,8 @@ fn contains_map(v: &Value) -> bool {
     }
 }
 
+/// Every map key anywhere in `values` is a text string (CBOR tags are
+/// followed). A tie-break signal between detection candidates.
 pub(crate) fn keys_all_text(values: &[Value]) -> bool {
     values.iter().all(value_keys_all_text)
 }

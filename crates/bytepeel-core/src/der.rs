@@ -332,7 +332,7 @@ fn utf32be(c: &[u8]) -> Option<String> {
 /// (`YYYYMMDDHH[MM[SS[.f+]]][Z|±hhmm]`). `None` if malformed.
 pub(crate) fn time_iso(t: &str, utc: bool) -> Option<String> {
     // Valid times are ASCII. Bailing out here also keeps every `&t[..]` slice
-    // below on a char boundary (multi-byte UTF-8 used to panic).
+    // below on a char boundary.
     if !t.is_ascii() {
         return None;
     }
@@ -727,7 +727,7 @@ mod tests {
             // LDAP
             ("0.9.2342.19200300.100.1.25", "domainComponent"),
             ("0.9.2342.19200300.100.1.1", "userId"),
-            // CT (already present)
+            // Certificate Transparency
             ("1.3.6.1.4.1.11129.2.4.2", "ctPrecertificateSCTs"),
         ] {
             assert_eq!(oid_name(oid), Some(name), "{oid}");

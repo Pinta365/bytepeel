@@ -1,10 +1,11 @@
-//! Re-encoding: change one protobuf field and re-serialize every layer.
+//! Re-encoding: change, add or remove one protobuf field, CBOR/MessagePack
+//! value or DER element, and re-serialize every layer.
 //!
-//! Edits are byte-exact splices. Only the target field's payload changes;
-//! the length prefixes of enclosing LEN fields are rewritten, and each outer
-//! layer is re-encoded in its original style (see `reencode.rs`). Every other
-//! byte is preserved, including field order, unknown fields and non-canonical
-//! encodings elsewhere. The result is decoded again and checked before it is
+//! Edits are byte-exact splices. Only the target item's bytes change; the
+//! lengths and item counts of enclosing containers are rewritten, and each
+//! outer layer is re-encoded in its original style (see `reencode.rs`). Every
+//! other byte is preserved, including field order, unknown fields and
+//! non-canonical encodings elsewhere. The result is decoded again and checked before it is
 //! returned.
 
 use crate::get::{self, Crossing, Holder};

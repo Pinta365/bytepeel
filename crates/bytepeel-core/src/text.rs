@@ -323,7 +323,7 @@ pub(crate) struct PemBundle {
 /// a bundle. A later broken block (a `BEGIN` without its `END`, or a body that
 /// is not base64) stops the scan: the blocks decoded so far are kept and the
 /// error is returned in `PemBundle::error` as a warning. If the first block is
-/// broken, nothing is recognised (today's behavior).
+/// broken, nothing is recognised.
 pub(crate) fn decode_pem(s: &str) -> Option<Result<PemBundle, Diag>> {
     const BEGIN: &str = "-----BEGIN ";
     let mut blocks: Vec<PemBlock> = Vec::new();
@@ -334,7 +334,7 @@ pub(crate) fn decode_pem(s: &str) -> Option<Result<PemBundle, Diag>> {
         let begin = cursor + rel;
         let after = &s[begin + BEGIN.len()..];
         let Some(label_end) = after.find("-----") else {
-            // A `BEGIN` with no closing dashes is not PEM (as before).
+            // A `BEGIN` with no closing dashes is not PEM.
             if blocks.is_empty() {
                 return None;
             }

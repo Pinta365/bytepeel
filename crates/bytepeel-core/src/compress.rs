@@ -1,7 +1,7 @@
 //! Compressed layers: gzip and zlib (feature `deflate`), zstd (feature `zstd`).
 //!
 //! Without the feature, a recognized stream is reported as a bytes leaf with an
-//! `UNSUPPORTED_FORMAT` warning, exactly as before the decoder existed.
+//! `UNSUPPORTED_FORMAT` warning.
 
 use crate::Diag;
 

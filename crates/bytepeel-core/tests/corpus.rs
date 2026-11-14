@@ -637,7 +637,7 @@ fn pem_later_bad_base64_is_a_warning() {
 
 #[test]
 fn pem_mismatched_end_label_is_not_a_block() {
-    // A missing END (here a mismatched label) is not recognised as PEM, as before.
+    // A missing END (here a mismatched label) is not recognised as PEM.
     let pem = "-----BEGIN CERTIFICATE-----\nAA==\n-----END PRIVATE KEY-----\n";
     assert_eq!(auto(pem.as_bytes()).codec, Codec::Utf8);
     let no_end = "-----BEGIN CERTIFICATE-----\nAA==\n";
@@ -878,7 +878,7 @@ fn dump_nonzero_start_input() {
 
 #[test]
 fn zero_start_dump_has_no_start_field() {
-    // Existing (offset-0) output is unchanged: no `"start"` key at all.
+    // A dump starting at offset 0 has no `"start"` key at all.
     assert!(!to_json(&auto(XXD.as_bytes())).contains("\"start\""));
 }
 
@@ -1814,8 +1814,7 @@ fn corrupt_stream_in_byte_string_keeps_its_warning() {
 #[test]
 fn large_zero_buffer_is_rejected_quickly() {
     // Zeros are a sequence of one-byte CBOR/MessagePack items. Detection must
-    // parse one item and stop, not build millions of values to count them
-    // (64 MiB took ~5 s and gigabytes in a debug build before; now ~ms).
+    // parse one item and stop, not build millions of values to count them.
     let zeros = vec![0u8; 64 << 20];
     let t = std::time::Instant::now();
     let n = auto(&zeros);
@@ -2301,9 +2300,9 @@ mod json_check {
 
 #[test]
 fn cbor_tag24_chain_is_linear_and_bounded_by_depth() {
-    // 40 nested tag-24 byte strings. Each level used to be parsed twice, so
-    // the work doubled per level; it must now finish instantly, and --depth
-    // must bound how many levels are decoded.
+    // 40 nested tag-24 byte strings. Each level must be parsed once (twice
+    // would double the work per level), and --depth must bound how many
+    // levels are decoded.
     fn bstr(b: &[u8]) -> Vec<u8> {
         let mut v = match b.len() {
             n if n < 24 => vec![0x40 | n as u8],
@@ -2341,9 +2340,9 @@ fn cbor_tag24_chain_is_linear_and_bounded_by_depth() {
 fn ambiguous_chain_is_linear_and_bounded_by_depth() {
     // Every level is a CBOR array(2) whose first element is a byte string
     // holding a MessagePack bin whose content is the next level (plus a
-    // trailing 0). Both parsers reach the same nested region, so before
-    // candidate parsing was structural, nested detection ran once per parser
-    // per level and the work grew ~1.8x per level.
+    // trailing 0). Both parsers reach the same nested region; if candidate
+    // parsing ran nested detection, it would run once per parser per level
+    // and the work would grow ~1.8x per level.
     let mut item: Vec<u8> = vec![0x82, 0x01, 0x02]; // CBOR [1, 2] core
     for _ in 0..48 {
         let mut bin = Vec::new();
@@ -2452,7 +2451,7 @@ fn map_less_value_trees_lose_to_plausible_protobuf() {
 #[test]
 fn der_time_with_multibyte_zone_does_not_panic() {
     // GeneralizedTime "2026111209+a\u{e9}b": a 5-byte zone whose bytes 2..4
-    // are one char. Slicing it by byte index used to panic (exit 101).
+    // are one char, so slicing it by byte index would panic.
     let mut buf = vec![0x30, 0x11, 0x18, 0x0f];
     buf.extend_from_slice("2026111209+a\u{e9}b".as_bytes());
     let n = auto(&buf);

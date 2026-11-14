@@ -129,7 +129,7 @@ pub enum Detail {
         len: usize,
     },
     /// Opaque bytes (nothing more specific was found, or the format is not
-    /// yet supported). Only the first [`BYTES_HEAD`] bytes are kept, for the
+    /// supported). Only the first [`BYTES_HEAD`] bytes are kept, for the
     /// preview: the full bytes are the parent's (the input, a layer's
     /// `decoded`, a field's or value's data), so a large leaf is not stored twice.
     Bytes {

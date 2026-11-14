@@ -28,9 +28,3 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd npm && npm run build && npm test     # needs the wasm32-unknown-unknown target
 ```
-
-## Session handoff
-
-Private dev notes are in `dev/` (gitignored). If `dev/HANDOFF.md` exists, read
-it first: it has the project's origin, its current status, the decisions made
-so far and the next steps.
