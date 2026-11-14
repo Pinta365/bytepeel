@@ -35,7 +35,7 @@
   "private": true,
   "scripts": {
     "build": "sh build.sh",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "protobuf",

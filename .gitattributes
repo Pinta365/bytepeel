@@ -1,0 +1,6 @@
+# Check out text with LF everywhere (tests compare exact bytes, e.g. PEM fixtures).
+* text=auto eol=lf
+*.gz binary
+*.zst binary
+*.zlib binary
+*.wasm binary
