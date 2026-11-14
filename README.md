@@ -36,6 +36,9 @@ JavaScript, use `npm install bytepeel` or `deno add jsr:@pinta365/bytepeel`
 (see [npm/README.md](npm/README.md)), and for Rust, the
 [`bytepeel-core`](https://crates.io/crates/bytepeel-core) crate.
 
+For Claude Code, the [plugin](#claude-code-plugin-and-agent-skill) adds a
+skill that makes Claude reach for bytepeel on its own, plus the MCP server.
+
 ## Supported formats
 
 | Layer | Notes |
