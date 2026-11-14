@@ -122,6 +122,29 @@ $ echo "$TOKEN" | bytepeel --get payload.sub --format raw   # a JWT claim
 See [docs/DESIGN.md](docs/DESIGN.md) for the full JSON schema, heuristics,
 error codes and roadmap.
 
+## MCP server
+
+`bytepeel mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio, so an agent can call bytepeel as a tool. It's built into the
+same binary and needs no runtime. For example, in Claude Code:
+
+```sh
+claude mcp add bytepeel -- bytepeel mcp
+```
+
+It offers two tools:
+
+- **`peel`** decodes `input` (text) or `file` (a path), with optional `get`,
+  `format` (`json`, `tree`, or `raw`, which returns the payload as hex) and
+  the CLI's options (`in`, `as`, `depth`, `alts`, `max_items`).
+- **`set`** applies `edits` (`[{"op":"set","path":"3.1","value":300}]`; `op`
+  can also be `add` or `del`) and returns the re-encoded data. Text comes back
+  as text and binary data as hex. Pass `output_file` to write the result
+  instead; an existing file is replaced only with `overwrite: true`.
+
+Errors come back as tool results with `isError: true` and the same
+`{"error":{...}}` JSON the CLI prints.
+
 ## JavaScript / WebAssembly
 
 `npm/` is a WebAssembly build with a small JS wrapper (Node, Deno, Bun,

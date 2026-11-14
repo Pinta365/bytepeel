@@ -442,6 +442,32 @@ in.
   headers (`REENCODE_UNSUPPORTED`), top-level items of a
   multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.
 
+## MCP server (`bytepeel mcp`)
+
+The CLI binary is also a Model Context Protocol server: `bytepeel mcp` reads
+newline-delimited JSON-RPC 2.0 on stdin and writes responses on stdout. It
+implements `initialize` (protocol versions 2024-11-05, 2025-03-26, 2025-06-18
+and 2025-11-25; a client asking for another gets 2025-06-18), `ping`,
+`tools/list` and `tools/call`. Notifications get no response. It has no
+dependencies; requests are read by a strict JSON parser in the CLI crate.
+
+| Tool | Arguments | Result text |
+|---|---|---|
+| `peel` | `input` (text) or `file` (path); `get`; `format`: `json` (default), `tree`, or `raw` (needs `get`; the payload as lowercase hex) | the CLI's output for the same options |
+| `set` | `input` or `file`; `edits`: `[{op, path, value}]`, applied in order. `op` is `set` (default), `add` or `del`. `value` is a JSON number, `true`/`false`/`null`, or a string in the CLI value syntax (`"\"text\""`, `"str:text"`, `"hex:0a0b"`, `"sint:-2"`); `del` takes none | `{"encoding":"text","data":..}` when the output is UTF-8, else `{"encoding":"hex","data":..}` |
+
+Both tools also take the CLI options `in`, `as`, `depth`, `alts` and
+`max_items`, and `output_file` (with `overwrite`). With `output_file` the
+result (raw bytes for `format: raw` and for `set`) is written to that path
+and the text is `{"written":PATH,"bytes":N}`. An existing file is replaced
+only with `overwrite: true`; otherwise the call fails with `IO`.
+
+A failed call is a tool result with `isError: true` whose text is the error
+JSON (`{"error":{"code":..,"message":..,"offset":..}}`, the same codes as the
+CLI). Unknown arguments are `USAGE`. A malformed message is a JSON-RPC error:
+`-32700` (not JSON), `-32600` (not a request), `-32601` (unknown method) or
+`-32602` (unknown tool, or `params`/`arguments` not an object).
+
 ## WebAssembly (`crates/bytepeel-wasm`, `npm/`)
 
 `bytepeel-wasm` compiles the core (with `deflate` and `zstd`) to
@@ -500,8 +526,8 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 
 | Code | Meaning |
 |---|---|
-| `USAGE` | Bad CLI arguments (exit 2) |
-| `IO` | File or stdin read failure (exit 2) |
+| `USAGE` | Bad CLI arguments (exit 2) or MCP tool arguments |
+| `IO` | File or stdin read failure (exit 2), or an MCP `output_file` that cannot be written or already exists |
 | `INVALID_UTF8` | Text was required (`--in hex/base64`, `--as text`) |
 | `EMPTY` | No hex digits or base64 characters |
 | `INVALID_CHAR` | Not a hex digit or base64 character (offset points at it) |
@@ -566,4 +592,3 @@ Alt scores are normalized to sum to 1, then truncated to `--alts`.
 ## Roadmap
 
 1. Publishing (crates.io, npm) when the project goes public
-2. An MCP server wrapping the library

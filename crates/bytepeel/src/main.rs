@@ -3,11 +3,14 @@ use std::process::ExitCode;
 
 use bytepeel_core::{self as core, Diag, Force, InputForm, Options};
 
+mod mcp;
+
 const HELP: &str = "\
 bytepeel - peel layers of encoding off binary data
 
 USAGE:
     bytepeel [OPTIONS] [FILE]      (reads stdin when FILE is omitted or '-')
+    bytepeel mcp                   Run as an MCP server on stdio (tools: peel, set)
     bytepeel [OPTIONS] set EDIT... [FILE]
                                    Edit protobuf fields, CBOR/MessagePack values or DER
                                    elements and re-encode every layer (hex, base64, PEM,
@@ -72,6 +75,7 @@ struct Args {
 
 enum Cmd {
     Run(Args),
+    Mcp,
     Help,
     Version,
 }
@@ -85,7 +89,45 @@ fn parse_num(v: &str, flag: &str) -> Result<usize, Diag> {
         .map_err(|_| usage(format!("{flag} expects a non-negative integer, got '{v}'")))
 }
 
+fn parse_in(v: &str, flag: &str) -> Result<InputForm, Diag> {
+    Ok(match v {
+        "auto" => InputForm::Auto,
+        "hex" => InputForm::Hex,
+        "base64" | "b64" => InputForm::Base64,
+        "raw" => InputForm::Raw,
+        v => {
+            return Err(usage(format!(
+                "unknown {flag} value '{v}' (expected auto|hex|base64|raw)"
+            )));
+        }
+    })
+}
+
+fn parse_as(v: &str, flag: &str) -> Result<Force, Diag> {
+    Ok(match v {
+        "protobuf" | "pb" => Force::Protobuf,
+        "der" | "asn1" => Force::Der,
+        "cbor" | "cb" => Force::Cbor,
+        "msgpack" | "mp" => Force::Msgpack,
+        "text" => Force::Text,
+        "bytes" => Force::Bytes,
+        v => {
+            return Err(usage(format!(
+                "unknown {flag} value '{v}' (expected protobuf|der|cbor|msgpack|text|bytes)"
+            )));
+        }
+    })
+}
+
 fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
+    // `bytepeel mcp`: the MCP server (a file named `mcp` is `./mcp`).
+    if argv.first().map(String::as_str) == Some("mcp") {
+        return if argv.len() == 1 {
+            Ok(Cmd::Mcp)
+        } else {
+            Err(usage("mcp takes no arguments (bytepeel mcp)"))
+        };
+    }
     let mut args = Args {
         file: None,
         set: None,
@@ -116,34 +158,8 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, Diag> {
         match flag.as_str() {
             "-h" | "--help" => return Ok(Cmd::Help),
             "-V" | "--version" => return Ok(Cmd::Version),
-            "--in" => {
-                args.opts.input = match value()?.as_str() {
-                    "auto" => InputForm::Auto,
-                    "hex" => InputForm::Hex,
-                    "base64" | "b64" => InputForm::Base64,
-                    "raw" => InputForm::Raw,
-                    v => {
-                        return Err(usage(format!(
-                            "unknown --in value '{v}' (expected auto|hex|base64|raw)"
-                        )));
-                    }
-                }
-            }
-            "--as" => {
-                args.opts.force = Some(match value()?.as_str() {
-                    "protobuf" | "pb" => Force::Protobuf,
-                    "der" | "asn1" => Force::Der,
-                    "cbor" | "cb" => Force::Cbor,
-                    "msgpack" | "mp" => Force::Msgpack,
-                    "text" => Force::Text,
-                    "bytes" => Force::Bytes,
-                    v => {
-                        return Err(usage(format!(
-                            "unknown --as value '{v}' (expected protobuf|der|cbor|msgpack|text|bytes)"
-                        )));
-                    }
-                })
-            }
+            "--in" => args.opts.input = parse_in(&value()?, "--in")?,
+            "--as" => args.opts.force = Some(parse_as(&value()?, "--as")?),
             "--depth" => args.opts.depth = parse_num(&value()?, "--depth")?,
             "--alts" => args.opts.alts = parse_num(&value()?, "--alts")?,
             "--max-items" => args.opts.max_items = parse_num(&value()?, "--max-items")?,
@@ -257,6 +273,12 @@ fn main() -> ExitCode {
         Ok(Cmd::Help) => {
             print!("{HELP}");
             return ExitCode::SUCCESS;
+        }
+        Ok(Cmd::Mcp) => {
+            return match mcp::serve() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&Diag::new("IO", e.to_string(), None), 2),
+            };
         }
         Ok(Cmd::Version) => {
             println!("bytepeel {}", env!("CARGO_PKG_VERSION"));

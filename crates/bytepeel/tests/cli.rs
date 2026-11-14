@@ -251,3 +251,50 @@ fn set_crosses_formats() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, b"a1 61 70 47 08 ac 02 12 02 68 69\n");
 }
+
+#[test]
+fn mcp_server_session() {
+    let dir = std::env::temp_dir().join(format!("bytepeel-mcp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_file = dir.join("out.hex");
+    let _ = std::fs::remove_file(&out_file);
+    let out_path = out_file.to_str().unwrap().replace('\\', "\\\\");
+    let session = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"peel","arguments":{"input":"1a03089601","get":"3.1"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"set","arguments":{"input":"a1 61 70 43 08 96 01","edits":[{"path":"p.1","value":300},{"op":"add","path":"p.2","value":"\"hi\""}]}}}"#.to_string(),
+        format!(r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"set","arguments":{{"input":"089601","edits":[{{"path":"1","value":1}}],"output_file":"{out_path}"}}}}}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"set","arguments":{{"input":"089601","edits":[{{"path":"1","value":2}}],"output_file":"{out_path}"}}}}}}"#),
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"peel","arguments":{"input":"1a03089601","get":"3.9"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":9,"method":"nope"}"#.to_string(),
+        "{broken".to_string(),
+    ]
+    .join("\n");
+    let (code, out, err) = run(&["mcp"], session.as_bytes());
+    assert_eq!(code, 0, "{err}");
+    let out = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    // One response per request; the notification gets none.
+    assert_eq!(lines.len(), 10, "{out}");
+    assert!(lines[0].contains(r#""id":1,"result":{"protocolVersion":"2024-11-05""#));
+    assert!(lines[1].contains(r#""name":"peel""#) && lines[1].contains(r#""name":"set""#));
+    assert!(lines[2].contains(r#"\"uint\":\"150\""#) && lines[2].contains(r#""isError":false"#));
+    assert!(
+        lines[3].contains(r#"a1 61 70 47 08 ac 02 12 02 68 69"#),
+        "{}",
+        lines[3]
+    );
+    assert!(lines[4].contains(r#"\"bytes\":4"#), "{}", lines[4]);
+    assert_eq!(std::fs::read(&out_file).unwrap(), b"0801");
+    // An existing output file is not replaced without overwrite.
+    assert!(lines[5].contains("already exists") && lines[5].contains(r#""isError":true"#));
+    assert_eq!(std::fs::read(&out_file).unwrap(), b"0801");
+    assert!(lines[6].contains("PATH_NOT_FOUND") && lines[6].contains(r#""isError":true"#));
+    assert!(lines[7].contains(r#""id":8,"error":{"code":-32602"#));
+    assert!(lines[8].contains(r#""id":9,"error":{"code":-32601"#));
+    assert!(lines[9].contains(r#""id":null,"error":{"code":-32700"#));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
