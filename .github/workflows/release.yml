@@ -1,6 +1,6 @@
 # Builds the CLI for each platform when a version tag (v0.1.0) is pushed and
 # attaches the archives to a *draft* GitHub release. Publishing to crates.io,
-# npm and JSR stays manual (see RELEASING.md).
+# npm and JSR stays manual.
 name: Release
 
 on:
