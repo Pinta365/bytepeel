@@ -302,6 +302,21 @@ A `range` points into the buffer the node or field was parsed from:
   integer stays a JSON number). `--format raw` writes a string's unescaped
   text, any other value's JSON, or a whole part's decoded bytes; `--format
   tree` prints `payload.sub = "1234"`.
+- JSON text: when the path reaches text that is a JSON object or array (a
+  decoded text layer such as base64 → gzip → JSON, a protobuf string field, or
+  a CBOR/MessagePack text string), the remaining segments are object keys /
+  array indices into it, with the same matching rules as JWT JSON
+  (`users.37.id`, `2.config.region`). The whole decoded text is read, not the
+  truncated preview. A bare JSON scalar (`"42"`) is text, not walked. Output:
+
+  ```jsonc
+  { "path": "users.37.id",                                  // within the JSON text
+    "range": [3263, 3268],                                  // in that text
+    "value": 10437 }                                        // the JSON value, verbatim
+  ```
+
+  `--format raw` and `--format tree` work as for JWT JSON (`users.37.id =
+  10437`). Values inside JSON text are not editable.
 - Text layers are descended automatically. `--format raw` writes the payload:
   a field's bytes, or a primitive element's content (a BIT STRING without its
   unused-bits byte).
@@ -314,7 +329,8 @@ A `range` points into the buffer the node or field was parsed from:
   map, `3.payload.sub` a claim of a JWT in a string field, and `p.1` a field
   of protobuf in a byte string. Descent within a format always wins, so a
   single-format path keeps its meaning. The result is printed in the
-  selected item's own schema (Field, Element, Value or the JWT form), with
+  selected item's own schema (Field, Element, Value, the JWT form or the
+  JSON form), with
   ranges in the buffer of the node it was found in. `bytepeel set` paths
   cross formats the same way.
 
@@ -437,7 +453,7 @@ in.
   `map16`). Indefinite CBOR containers have no count: items go before the
   break byte.
 - **Not editable:** JWT, including data inside a JWT part (editing
-  would invalidate the signature),
+  would invalidate the signature), values inside JSON text,
   multi-member gzip / multi-frame zstd, PEM blocks with RFC 1421
   headers (`REENCODE_UNSUPPORTED`), top-level items of a
   multi-item CBOR/MessagePack sequence, and whole PEM blocks of a bundle.

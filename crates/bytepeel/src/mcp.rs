@@ -105,8 +105,9 @@ const COMMON_PROPS: &str = r#""input":{"type":"string","description":"The data a
 
 const PATHS: &str = "Paths: protobuf field numbers (1.3[2].4: the third field 3 of message 1), \
 DER child indices (0.0.5), a PEM bundle's block index first, CBOR/MessagePack map keys and array \
-indices (users.0.name), a JWT part then JSON keys (payload.sub). Paths cross formats: 2.0.0.5 is \
-the subject of a certificate (base64, PEM or raw DER) held in protobuf field 2.";
+indices (users.0.name), a JWT part then JSON keys (payload.sub), JSON keys and indices inside \
+decoded JSON text (users.37.id). Paths cross formats: 2.0.0.5 is the subject of a certificate \
+(base64, PEM or raw DER) held in protobuf field 2.";
 
 fn tools_list() -> String {
     let peel_desc = format!(

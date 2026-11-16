@@ -32,7 +32,8 @@ OPTIONS:
     --get <PATH>                   Select one protobuf field (field numbers, e.g. 1.3[2].4),
                                    DER element (child indices, e.g. 0.0.6), or CBOR/MessagePack
                                    value (map keys / array indices, e.g. users.0.name), or JWT
-                                   part and JSON claim (e.g. payload, payload.sub, header.alg).
+                                   part and JSON claim (e.g. payload, payload.sub, header.alg),
+                                   or a value in decoded JSON text (e.g. users.37.id).
                                    Paths cross formats: 2.0.0.5 is the subject of a certificate
                                    in protobuf field 2
     --format <json|tree|raw>       Output format (default: json; raw needs --get)

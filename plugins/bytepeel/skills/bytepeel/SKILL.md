@@ -39,7 +39,8 @@ mark the result as unverified.
 - Start with `tree` to see the structure, then `--get` the part you need.
   The JSON output is complete but longer.
 - Long text and bytes are previewed (`"truncated":true`). Use `--get PATH
-  --format raw` for the whole value.
+  --format raw` for the whole value. If the text is JSON, `--get` its keys
+  directly (`users.37.id`): the path reads the whole text, not the preview.
 
 ## Reading the output
 
@@ -70,6 +71,7 @@ mark the result as unverified.
 | PEM bundle | first index picks the block | `1.0.0.5` = 2nd cert's subject |
 | CBOR / MessagePack | map keys and array indices | `users.0.name` |
 | JWT | part, then JSON keys | `payload.sub`, `header.alg` |
+| JSON text (decoded, or in a string) | keys and array indices | `users.37.id` |
 
 Paths cross formats: when a segment can't go further in the current format but
 the item holds decoded data, the rest of the path continues inside it. So

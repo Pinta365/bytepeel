@@ -2508,3 +2508,82 @@ fn tree_floats_use_exponent_form_like_json() {
     assert!(t.contains("double=8.73125457753e-312"), "{t}");
     assert!(to_json(&n).contains(r#""double":8.73125457753e-312"#));
 }
+
+#[test]
+fn get_walks_json_in_a_text_layer() {
+    // base64 of a JSON document longer than the text preview: the path reads
+    // the whole decoded text, not the preview.
+    let users: Vec<String> = (0..60)
+        .map(|i| {
+            format!(
+                r#"{{"id":{},"name":"user{i:03}","roles":["viewer"]}}"#,
+                10400 + i
+            )
+        })
+        .collect();
+    let doc = format!(r#"{{"tenant":"acme","users":[{}]}}"#, users.join(","));
+    assert!(doc.len() > 2 * TEXT_HEAD);
+    let n = peel(b64(doc.as_bytes()).as_bytes(), &Options::default()).unwrap();
+
+    let p = get(&n, "users.57").unwrap();
+    let Pick::Json(j) = &p else { panic!("{p:?}") };
+    assert_eq!(j.path, "users.57");
+    assert_eq!(&doc[j.range[0]..j.range[1]], j.value());
+    assert_eq!(
+        p.to_json(),
+        format!(
+            r#"{{"path":"users.57","range":[{},{}],"value":{}}}"#,
+            j.range[0], j.range[1], users[57]
+        )
+    );
+    assert_eq!(
+        get(&n, "users.57.id").unwrap().to_tree(),
+        "users.57.id = 10457\n"
+    );
+    // raw: a string unescaped, anything else verbatim.
+    assert_eq!(get(&n, "tenant").unwrap().payload().unwrap(), b"acme");
+    assert_eq!(
+        get(&n, "users.3.roles").unwrap().payload().unwrap(),
+        br#"["viewer"]"#
+    );
+
+    let e = get(&n, "users.60").unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("PATH_NOT_FOUND", "no index '60' at 'users'")
+    );
+    let e = get(&n, "nope").unwrap_err();
+    assert_eq!(e.message, "no key 'nope' at 'the top level'");
+    // Editing inside JSON text is refused, not misread as another format.
+    let e = set(
+        b64(doc.as_bytes()).as_bytes(),
+        &Options::default(),
+        "users.0.id",
+        &parse_value("1").unwrap(),
+    );
+    assert_eq!(e.unwrap_err().code, "REENCODE_UNSUPPORTED");
+}
+
+#[test]
+fn get_walks_json_in_protobuf_strings_and_cbor_text() {
+    // A protobuf string field holding JSON: the path continues into it.
+    let json = br#"{"k":{"n":[5,6]}}"#;
+    let mut msg = b"\x0a\x03abc\x12".to_vec();
+    msg.push(json.len() as u8);
+    msg.extend_from_slice(json);
+    let n = peel(&msg, &Options::default()).unwrap();
+    assert_eq!(
+        get(&n, "2.k.n.1").unwrap().to_json(),
+        r#"{"path":"k.n.1","range":[13,14],"value":6}"#
+    );
+    // Field 1 is a plain string, not JSON: nothing to walk.
+    assert!(get(&n, "1.k").is_err());
+
+    // A CBOR text string holding JSON.
+    let n = cbor("a16170677b226b223a377d"); // {"p": "{\"k\":7}"}
+    assert_eq!(get(&n, "p.k").unwrap().to_tree(), "k = 7\n");
+
+    // A bare JSON scalar is just text.
+    let n = cbor("a1617063223422"); // {"p": "\"4\""}
+    assert_eq!(get(&n, "p.x").unwrap_err().code, "PATH_NOT_MESSAGE");
+}

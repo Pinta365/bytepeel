@@ -6,11 +6,14 @@
 //! natively but the current item holds a decoded node (a protobuf string that
 //! is base64 DER, a CBOR byte string that is protobuf, a JWT part that is not
 //! JSON), the rest of the path continues in that node's format. Native descent
-//! always wins, so every single-format path keeps its meaning.
+//! always wins, so every single-format path keeps its meaning. Text that is a
+//! JSON object or array (a decoded text layer, a protobuf string, a
+//! CBOR/MessagePack text string) is walked by JSON keys and array indices.
 
 use crate::Diag;
 use crate::json;
-use crate::node::{AltKind, Asn1, Field, FieldValue, Node};
+use crate::jsonpath;
+use crate::node::{AltKind, Asn1, Detail, Field, FieldValue, Node};
 use crate::path::{
     self, JwtPick, bundle_parts, der_items, field_children, jwt_parts, map_index, message_fields,
     values_items,
@@ -25,6 +28,44 @@ pub enum Pick<'a> {
     Element(&'a Asn1),
     Value(&'a Value),
     Jwt(JwtPick<'a>),
+    Json(JsonPick<'a>),
+}
+
+/// A value inside JSON text.
+#[derive(Debug)]
+pub struct JsonPick<'a> {
+    /// The whole JSON document.
+    pub doc: &'a str,
+    /// The path within the document (the segments after the text's holder).
+    pub path: String,
+    /// The selected value's byte range in `doc`.
+    pub range: [usize; 2],
+}
+
+impl JsonPick<'_> {
+    /// The selected value as JSON text.
+    pub fn value(&self) -> &str {
+        &self.doc[self.range[0]..self.range[1]]
+    }
+
+    /// `{"path":..,"range":[s,e],"value":<JSON>}`.
+    pub fn to_json(&self) -> String {
+        let mut o = String::from("{\"path\":");
+        json::esc(&mut o, &self.path);
+        o.push_str(&format!(
+            ",\"range\":[{},{}],\"value\":{}}}",
+            self.range[0],
+            self.range[1],
+            self.value()
+        ));
+        o
+    }
+
+    /// A string's unescaped text, any other value verbatim.
+    pub fn payload(&self) -> Vec<u8> {
+        let v = self.value();
+        jsonpath::string_value(v).map_or_else(|| v.as_bytes().to_vec(), String::into_bytes)
+    }
 }
 
 impl Pick<'_> {
@@ -35,6 +76,7 @@ impl Pick<'_> {
             Pick::Element(e) => json::asn1_to_json(e),
             Pick::Value(v) => json::value_to_json(v),
             Pick::Jwt(p) => p.to_json(),
+            Pick::Json(p) => p.to_json(),
         }
     }
 
@@ -45,6 +87,7 @@ impl Pick<'_> {
             Pick::Element(e) => tree::asn1_to_tree(e),
             Pick::Value(v) => tree::value_to_tree(v),
             Pick::Jwt(p) => p.to_tree(),
+            Pick::Json(p) => format!("{} = {}\n", p.path, p.value()),
         }
     }
 
@@ -63,6 +106,7 @@ impl Pick<'_> {
             Pick::Element(e) => e.payload().ok_or_else(|| none("a constructed element")),
             Pick::Value(v) => v.payload().ok_or_else(|| none("this value")),
             Pick::Jwt(p) => Ok(p.payload()),
+            Pick::Json(p) => Ok(p.payload()),
         }
     }
 }
@@ -188,13 +232,16 @@ fn walk<'a>(
     if let Some(fields) = message_fields(node) {
         return walk_fields(fields, segs, i, cx);
     }
+    if let Some(doc) = text_doc(node) {
+        return walk_json(doc, segs, i);
+    }
     Err(Diag::new(
         "PATH_NOT_MESSAGE",
         if i == 0 {
-            "the input did not decode to protobuf, DER, CBOR/MessagePack or a JWT".to_string()
+            "the input did not decode to protobuf, DER, CBOR/MessagePack, a JWT or JSON".to_string()
         } else {
             format!(
-                "the data decoded at '{}' is not protobuf, DER, CBOR/MessagePack or a JWT",
+                "the data decoded at '{}' is not protobuf, DER, CBOR/MessagePack, a JWT or JSON",
                 at(segs, i)
             )
         },
@@ -241,7 +288,10 @@ fn walk_fields<'a>(
                 });
                 walk(node, segs, i, cx)
             }
-            None => Err(no_children(segs, i, "the field")),
+            None => match json_alt(f) {
+                Some(doc) => walk_json(doc, segs, i),
+                None => Err(no_children(segs, i, "the field")),
+            },
         };
     }
 }
@@ -259,6 +309,49 @@ fn decoded_alt(f: &Field) -> Option<&Node> {
         }),
         _ => None,
     }
+}
+
+/// The text of a LEN field's string alt, when it is a JSON object or array.
+fn json_alt(f: &Field) -> Option<&str> {
+    match &f.value {
+        FieldValue::Len { alts, .. } => alts.iter().find_map(|a| match &a.kind {
+            AltKind::String { text, .. } if is_json_doc(text) => Some(text.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The whole text of a node that is (after any layers) JSON text. A layer's
+/// decoded bytes hold the full text; a root text node holds it only when it
+/// is short enough to be kept whole.
+fn text_doc(node: &Node) -> Option<&str> {
+    match &node.detail {
+        Detail::Layer { decoded, child } => match &child.detail {
+            Detail::Text { .. } => std::str::from_utf8(decoded).ok().filter(|t| is_json_doc(t)),
+            _ => text_doc(child),
+        },
+        Detail::Text { text, len } if *len == text.len() => {
+            Some(text.as_str()).filter(|t| is_json_doc(t))
+        }
+        _ => None,
+    }
+}
+
+/// A JSON object or array (not a bare scalar: a number or a quoted word is
+/// text, not a document to walk).
+fn is_json_doc(t: &str) -> bool {
+    matches!(t.trim_start().as_bytes().first(), Some(b'{' | b'['))
+        && jsonpath::find(t, &[], "").is_ok()
+}
+
+fn walk_json<'a>(doc: &'a str, segs: &[&str], i: usize) -> Result<Pick<'a>, Diag> {
+    let range = jsonpath::find(doc, &segs[i..], &at(segs, i))?;
+    Ok(Pick::Json(JsonPick {
+        doc,
+        path: segs[i..].join("."),
+        range,
+    }))
 }
 
 fn walk_der<'a>(mut items: &'a [Asn1], segs: &[&str], mut i: usize) -> Result<Pick<'a>, Diag> {
@@ -330,6 +423,7 @@ fn walk_values<'a>(
                 });
                 return walk(node, segs, i, cx);
             }
+            ValueKind::Text(t) if is_json_doc(t) => return walk_json(t, segs, i),
             _ => return Err(no_children(segs, i, "the value")),
         };
         i += 1;

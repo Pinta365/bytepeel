@@ -74,6 +74,7 @@ bytepeel [OPTIONS] [FILE]            # stdin when FILE is omitted or '-'
                                      PEM bundle: first index picks the block, e.g. 1.0.0.5
                                      CBOR/MessagePack: map keys / array indices, e.g. users.0.name
                                      JWT: part, then JSON keys, e.g. payload.sub, header.alg
+                                     JSON text (decoded, or in a string): keys, e.g. users.37.id
                                      paths cross formats: 2.0.0.5 = a cert's subject in
                                      protobuf field 2 (base64, PEM or raw DER)
 --format <json|tree|raw>             raw writes a --get selection's payload bytes

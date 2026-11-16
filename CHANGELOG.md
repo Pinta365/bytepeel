@@ -6,6 +6,10 @@ schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Unreleased
 
+- `--get` walks into JSON text: a decoded text layer (base64 → gzip → JSON),
+  a protobuf string field or a CBOR/MessagePack text string that holds a
+  JSON object or array takes key and index segments (`users.37.id`). It reads
+  the whole text, so values past the truncated preview are reachable.
 - `--format tree` prints floats like the JSON output (exponent form for very
   small and very large values), so a fixed64 timestamp's `double` reading is
   `8.73e-312` instead of hundreds of digits.

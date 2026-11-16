@@ -8,7 +8,7 @@
 //! non-canonical encodings elsewhere. The result is decoded again and checked before it is
 //! returned.
 
-use crate::get::{self, Crossing, Holder};
+use crate::get::{self, Crossing, Holder, Pick};
 use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node, TagClass};
 use crate::path::{
     bundle_parts, der_items, field_children, jwt_parts, map_index, message_fields, parse_path,
@@ -230,7 +230,11 @@ impl Op {
 fn crossing<'a>(root: &'a Node, op: &Op) -> Result<Option<Crossing<'a>>, Diag> {
     let path = op.path();
     if let Op::Set(..) = op {
-        return Ok(get::locate(root, path)?.1);
+        let (pick, cx) = get::locate(root, path)?;
+        if let Pick::Json(_) = pick {
+            return Err(json_unsupported());
+        }
+        return Ok(cx);
     }
     let Some((parent, _)) = path.rsplit_once('.') else {
         return Ok(None);
@@ -239,6 +243,9 @@ fn crossing<'a>(root: &'a Node, op: &Op) -> Result<Option<Crossing<'a>>, Diag> {
     let Ok((pick, cx)) = get::locate(root, parent) else {
         return Ok(None);
     };
+    if let Pick::Json(_) = pick {
+        return Err(json_unsupported());
+    }
     Ok(get::leaf_crossing(&pick, parent.split('.').count()).or(cx))
 }
 
@@ -286,6 +293,10 @@ fn edit_across(
 /// A selection error on the re-encoded output is a verification failure.
 fn vf(e: Diag) -> Diag {
     verify_failed(&format!("{}: {}", e.code, e.message))
+}
+
+fn json_unsupported() -> Diag {
+    unsupported("editing values inside JSON text is not supported; set the whole text instead")
 }
 
 fn jwt_unsupported() -> Diag {

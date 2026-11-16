@@ -27,12 +27,12 @@ pub(crate) fn find(text: &str, segs: &[&str], what: &str) -> Result<[usize; 2], 
     }
     let mut cur = [start, end];
     for (n, seg) in segs.iter().enumerate() {
-        let at = || {
-            if n == 0 {
-                what.to_string()
-            } else {
-                format!("{what}.{}", segs[..n].join("."))
-            }
+        // `what` is the path before the document; empty at the top level.
+        let at = || match (what.is_empty(), n) {
+            (true, 0) => "the top level".to_string(),
+            (true, _) => segs[..n].join("."),
+            (false, 0) => what.to_string(),
+            (false, _) => format!("{what}.{}", segs[..n].join(".")),
         };
         cur = match b[cur[0]] {
             b'{' => member(b, cur[0], seg).ok_or_else(|| {
