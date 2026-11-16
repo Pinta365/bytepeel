@@ -1,0 +1,16 @@
+---
+max_turns: 20
+timeout_seconds: 300
+tags: [protobuf, der, nested]
+---
+This protobuf message (base64) stores a trust anchor; field 2 holds the certificate.
+
+```
+Cgx0cnVzdC1hbmNob3ISnwQwggIbMIIBoaADAgECAhBB0p3Rcurup4DBLGzpL4dSMAoGCCqGSM49BAMDME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBTZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMB4XDTIwMDkwNDAwMDAwMFoXDTQwMDkxNzE2MDAwMFowTzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDIwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAATNm9WfgIMK7AlK8xZKPlzPd6zeZwUNHQe23Bb7WosU2+JxYMS6RZURiY7qBt/3KhYcpLnFxTLgA+Aeghg4i9dF2ApqbuYAd/sCUX0i2Apumlt33/D6Qew53HXKaAcMH+qjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBR8Qpau3ktIO/qS+J6Mz22LqXI3lTAKBggqhkjOPQQDAwNoADBlAjB7eU5GUITCRIdGG0Vw/1iZ3vT9pNJVpiAtdNY0vEGjUF8BJ1a0vid1Bq8SLnWYjfwCMQCL9Xds1MhlquALLO4UnSc3pPlTpVHkKYPX+JAxW0KfCvX+rgBo54xJD7ZvW1sV8ucYAg==
+```
+
+When does the certificate expire? Give the notAfter date.
+
+End your reply with one line in exactly this form:
+
+ANSWER: <YYYY-MM-DD>

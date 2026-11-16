@@ -1,0 +1,16 @@
+---
+max_turns: 20
+timeout_seconds: 300
+tags: [large, protobuf, jwt, nested]
+---
+This is the value of a `x-auth-context-bin` gRPC metadata header:
+
+```
+CgpyZXEtOWYyYzQxErcECg1hdXRob3JpemF0aW9uEqUEQmVhcmVyIGV5SmhiR2NpT2lKU1V6STFOaUlzSW10cFpDSTZJakl3TWpZdGNUUWlmUS5leUpwYzNNaU9pSm9kSFJ3Y3pvdkwyRjFkR2d1WlhoaGJYQnNaUzV1WlhRaUxDSnpkV0lpT2lKaFoyVnVkQzF5ZFc1dVpYSXRNVElpTENKbGVIQWlPakUzT1RVeE16STRNREFzSW1OdVppSTZleUo0TlhRalV6STFOaUk2SWxsNk9XMVRNbmhRWVZaQ1psa3dXbkpSTTJoRUluMTkuYUoxSWU1bEpDX0tuaXp1N2duUkk4TEFaR3ZjN19aaTViUVl4Rk9ZWGsyQ19SbGNOb2haVXgtN1BOMS1VQm1fbXczcTZPc3JCMURDc3BoaWhEeF9feGtMMFpNMDhabkQtMThTQ1ZwcC12akJVbk95UDBPbnpjSk5QQzJEaTBzY0hFcFZDWVJ3ZE5uRm5qUmFDWm9aQXBKeUtZZUZrZDlEdFlvaVBLNFR0VXo3R0ljODhpWGFQUzJUbjhlVF8tQ19jZVV5dXVCSksxQThvRHlOTkp5aWJDVDRqU2VNN3pjZUhpZE9lcFBHVEpVV01Ka21NUF9sX3ZIRDJJb01tRVgtdEdmR1B1dU5PS0NWTFZZZWlHTXFQR3REY0s5RHJ5XzFHYUtaUVlUQWdHWXpBWlRiU214eHlYWF9SZ1Nsb3otWFpyTmlUMVEyZjZLQ3BLdy0tWDZDRnRnGAE=
+```
+
+Whose token is it (`sub`), and when does it expire (UTC date, YYYY-MM-DD)?
+
+End your reply with one line in exactly this form:
+
+ANSWER: <sub> <YYYY-MM-DD>

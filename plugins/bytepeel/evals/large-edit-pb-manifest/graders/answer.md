@@ -1,0 +1,4 @@
+---
+type: 'regex'
+pattern: 'ANSWER:\s*`?CgxwYXltZW50cy1hcGkSBHByb2QanAEIrAISaAoDYXBpEjVyZWdpc3RyeS5leGFtcGxlLm5ldC9wYXltZW50cy9hcGk6MjAyNi4xMS4xNC1ob3RmaXguMRiQPyIRCglMT0dfTEVWRUwSBGluZm8iFAoGUkVHSU9OEgpldS1ub3J0aC0xEiQKBWVudm95EhhlbnZveXByb3h5L2Vudm95OnYxLjMyLjEYrU0qB3JvbGxpbmd6KAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJic=`?\s*$'
+---
