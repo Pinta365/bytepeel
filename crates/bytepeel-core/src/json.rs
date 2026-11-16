@@ -198,7 +198,7 @@ fn hex_head_kv(o: &mut String, head: &[u8], len: usize) {
     }
 }
 
-fn fmt_f64(x: f64) -> String {
+pub(crate) fn fmt_f64(x: f64) -> String {
     if x.is_nan() {
         "\"NaN\"".into()
     } else if x.is_infinite() {
@@ -217,7 +217,7 @@ fn fmt_f64(x: f64) -> String {
     }
 }
 
-fn fmt_f32(x: f32) -> String {
+pub(crate) fn fmt_f32(x: f32) -> String {
     if x.is_nan() {
         "\"NaN\"".into()
     } else if x.is_infinite() {

@@ -4,7 +4,17 @@ use std::fmt::Write as _;
 
 use crate::node::{AltKind, Asn1, Asn1Value, Codec, Detail, Field, FieldValue, Node};
 use crate::value::{Value, ValueKind};
-use crate::{der, value, varint};
+use crate::{der, json, value, varint};
+
+/// Floats as in the JSON output (exponent form outside [1e-6, 1e15)), without
+/// the quotes JSON puts around NaN and the infinities.
+fn f64_text(x: f64) -> String {
+    json::fmt_f64(x).trim_matches('"').to_string()
+}
+
+fn f32_text(x: f32) -> String {
+    json::fmt_f32(x).trim_matches('"').to_string()
+}
 
 pub fn node_to_tree(n: &Node) -> String {
     let mut o = String::new();
@@ -48,11 +58,12 @@ fn value(o: &mut String, v: &Value, d: usize) {
             let _ = writeln!(o, " {}", -(*n as i128) - 1);
         }
         ValueKind::Float { value: x, width } => {
-            if *width == 64 {
-                let _ = writeln!(o, " {x} width={width}");
+            let shown = if *width == 64 {
+                f64_text(*x)
             } else {
-                let _ = writeln!(o, " {} width={width}", *x as f32);
-            }
+                f32_text(*x as f32)
+            };
+            let _ = writeln!(o, " {shown} width={width}");
         }
         ValueKind::Bool(b) => {
             let _ = writeln!(o, " {b}");
@@ -260,7 +271,7 @@ fn field(o: &mut String, f: &Field, d: usize) {
                 o,
                 " fixed64={value} sfixed64={} double={}",
                 *value as i64,
-                f64::from_bits(*value)
+                f64_text(f64::from_bits(*value))
             );
         }
         FieldValue::I32 { value } => {
@@ -268,7 +279,7 @@ fn field(o: &mut String, f: &Field, d: usize) {
                 o,
                 " fixed32={value} sfixed32={} float={}",
                 *value as i32,
-                f32::from_bits(*value)
+                f32_text(f32::from_bits(*value))
             );
         }
         FieldValue::Len { data, alts, .. } => {

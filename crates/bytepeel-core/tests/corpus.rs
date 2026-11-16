@@ -2495,3 +2495,16 @@ fn float_width_uses_source_precision() {
     let j = cbor("82fb3fb999999999999a01");
     assert!(j.contains(r#""value":0.1,"width":64"#), "{j}");
 }
+
+#[test]
+fn tree_floats_use_exponent_form_like_json() {
+    // A fixed64 millisecond timestamp reads as a subnormal double. The tree
+    // shows it in exponent form, as the JSON does, instead of ~300 digits.
+    let mut msg = vec![0x09];
+    msg.extend_from_slice(&1_767_225_600_692u64.to_le_bytes());
+    msg.extend_from_slice(b"\x12\x03kPa");
+    let n = peel(&msg, &Options::default()).unwrap();
+    let t = to_tree(&n);
+    assert!(t.contains("double=8.73125457753e-312"), "{t}");
+    assert!(to_json(&n).contains(r#""double":8.73125457753e-312"#));
+}

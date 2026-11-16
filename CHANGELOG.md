@@ -4,6 +4,12 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org/); the public contract is the JSON
 schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Unreleased
+
+- `--format tree` prints floats like the JSON output (exponent form for very
+  small and very large values), so a fixed64 timestamp's `double` reading is
+  `8.73e-312` instead of hundreds of digits.
+
 ## 0.1.1 (2026-11-15)
 
 - `npx bytepeel` and `npx -y bytepeel mcp`: the npm package now has a
