@@ -1,6 +1,6 @@
 {
   "name": "bytepeel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Peel layers of encoding off binary data (hex, base64, PEM, JWT, gzip, zstd, protobuf, DER/ASN.1, CBOR, MessagePack) and edit it in place. A WebAssembly library plus the bytepeel CLI and MCP server (npx bytepeel mcp).",
   "license": "MIT",
   "author": "Pinta365",
@@ -37,11 +37,11 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "bytepeel-darwin-arm64": "0.1.1",
-    "bytepeel-darwin-x64": "0.1.1",
-    "bytepeel-linux-arm64": "0.1.1",
-    "bytepeel-linux-x64": "0.1.1",
-    "bytepeel-win32-x64": "0.1.1"
+    "bytepeel-darwin-arm64": "0.1.2",
+    "bytepeel-darwin-x64": "0.1.2",
+    "bytepeel-linux-arm64": "0.1.2",
+    "bytepeel-linux-x64": "0.1.2",
+    "bytepeel-win32-x64": "0.1.2"
   },
   "scripts": {
     "build": "sh build.sh",

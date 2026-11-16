@@ -1,7 +1,7 @@
 {
   "name": "bytepeel",
   "description": "Decode and edit hex, base64, PEM, JWT, gzip/zstd, DER/ASN.1, CBOR, MessagePack and protobuf data with bytepeel instead of guessing bytes. A skill that tells Claude when and how to use it, plus the bytepeel MCP server (run with npx; needs Node.js 18+).",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": { "name": "Pinta365" },
   "homepage": "https://github.com/Pinta365/bytepeel",
   "repository": "https://github.com/Pinta365/bytepeel",

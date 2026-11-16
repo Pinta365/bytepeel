@@ -16,4 +16,4 @@ name = "bytepeel"
 path = "src/main.rs"
 
 [dependencies]
-bytepeel-core = { path = "../bytepeel-core", version = "0.1.1", features = ["deflate", "zstd"] }
+bytepeel-core = { path = "../bytepeel-core", version = "0.1.2", features = ["deflate", "zstd"] }

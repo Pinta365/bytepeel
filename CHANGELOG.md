@@ -4,7 +4,7 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org/); the public contract is the JSON
 schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
-## Unreleased
+## 0.1.2 (2026-11-16)
 
 - Packed fixed-width integers rank correctly: a protobuf LEN field holding
   fixed64/fixed32 ids, timestamps or counters (values sharing their high
