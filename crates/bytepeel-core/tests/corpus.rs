@@ -2587,3 +2587,67 @@ fn get_walks_json_in_protobuf_strings_and_cbor_text() {
     let n = cbor("a1617063223422"); // {"p": "\"4\""}
     assert_eq!(get(&n, "p.x").unwrap_err().code, "PATH_NOT_MESSAGE");
 }
+
+/// Field 2 of `0a 03 "abc" 12 <len> <data>`, with `data` as its payload.
+fn len_field_alts(data: &[u8]) -> Vec<&'static str> {
+    let mut msg = b"\x0a\x03abc\x12".to_vec();
+    assert!(data.len() < 128);
+    msg.push(data.len() as u8);
+    msg.extend_from_slice(data);
+    let n = peel(&msg, &Options::default()).unwrap();
+    let f = select(&n, "2").unwrap();
+    match &f.value {
+        FieldValue::Len { alts, .. } => alts.iter().map(|a| a.kind.name()).collect(),
+        v => panic!("not LEN: {v:?}"),
+    }
+}
+
+#[test]
+fn packed_fixed_width_integer_columns_rank_first() {
+    // Ids from one generator share their high bits. Read as varints they come
+    // apart at random continuation bits; before, packed_fixed64 ranked last
+    // (and fell off the default three alts).
+    let ids: [u64; 6] = [
+        0x13b7_2c91_0a44_f3e1,
+        0x1062_d4f0_93ab_7c25,
+        0x1712_88e3_5d0c_a9b4,
+        0x11f9_40a7_cc38_2e8f,
+        0x1488_0b5e_7192_d6c3,
+        0x1625_e7d9_08f1_4b7a,
+    ];
+    let data: Vec<u8> = ids.iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(len_field_alts(&data)[0], "packed_fixed64");
+
+    // Millisecond timestamps and 32-bit sensor ids.
+    let ts: Vec<u8> = (0..5u64)
+        .flat_map(|i| (1_767_225_600_000 + i * 15_017).to_le_bytes())
+        .collect();
+    assert_eq!(len_field_alts(&ts)[0], "packed_fixed64");
+    let sensors: Vec<u8> = [
+        0xa001_2f3c_u32,
+        0xa00e_9b01,
+        0xa007_44d8,
+        0xa00c_c0a7,
+        0xa003_1e5f,
+    ]
+    .iter()
+    .flat_map(|v| v.to_le_bytes())
+    .collect();
+    assert_eq!(len_field_alts(&sensors)[0], "packed_fixed32");
+}
+
+#[test]
+fn varint_lists_are_not_read_as_fixed_width_columns() {
+    let enc = |vs: &[u64]| -> Vec<u8> { vs.iter().flat_map(|&v| varint::encode(v)).collect() };
+    // Two-byte varints: every other byte is small, so 32-bit words share high
+    // zero bits, but the encodings are all one length.
+    let two = enc(&[300, 1500, 812, 1999, 640, 1024, 777, 1234]);
+    assert_eq!(two.len() % 4, 0);
+    assert_eq!(len_field_alts(&two)[0], "packed_varint");
+    // Packed bools: 32 single bytes of 0/1.
+    let bools = enc(&[1, 0, 1, 1, 0, 0, 1, 0].repeat(4));
+    assert_eq!(len_field_alts(&bools)[0], "packed_varint");
+    // A constant column is no evidence either way.
+    let same = 0x1234_5678_9abc_def0_u64.to_le_bytes().repeat(4);
+    assert_ne!(len_field_alts(&same)[0], "packed_fixed64");
+}

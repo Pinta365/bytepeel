@@ -538,7 +538,7 @@ packages from a GitHub release's archives.
 | LEN alt: message | plausibility, ×0.3 if the payload is fully printable |
 | LEN alt: string | 0.9 × printable_ratio⁴ |
 | LEN alt: packed_varint | 0.25 if mostly non-printable, else 0.03 |
-| LEN alt: packed_fixed64 / packed_fixed32 | offered when the length is a multiple of 8 / 4: 0.3 / 0.28 × p⁴ + 0.01 if mostly non-printable (p = share of values that read as a plausible float: 0, or finite with magnitude in [1e-9, 1e12]), else 0.01. Two floats can also read as one plausible double, so both alts may appear |
+| LEN alt: packed_fixed64 / packed_fixed32 | offered when the length is a multiple of 8 / 4. If mostly non-printable, the higher of two scores: 0.3 / 0.28 × p⁴ + 0.01 (p = share of values that read as a plausible float: 0, or finite with magnitude in [1e-9, 1e12]), and 0.6 / 0.56 × c⁴ + 0.01 (c = integer-column evidence: at least 4 values, not all equal, sharing s ≥ 3 high bits; c = min(1, s × (n−1) / 24); 0 when the bytes also parse as varints whose encodings differ in length by at most one byte, as real varint lists do). Otherwise 0.01. Two floats can also read as one plausible double, so both alts may appear |
 | LEN alt: bytes | always present at 0.02 |
 | LEN alt: bytes, decoded | after a message wins, a LEN field whose best alt is bytes or packed numbers gets nested detection; a non-protobuf result with confidence ≥ 0.8 (compressed, DER, CBOR/MessagePack with map keys) becomes the bytes alt's `decoded`, weighted 4 × its confidence against the already-normalized alts, then all are renormalized. Messages and strings are not re-detected (that would double the cost per level) |
 

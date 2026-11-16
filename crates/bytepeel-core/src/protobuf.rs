@@ -348,7 +348,19 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             });
         }
     }
-    if let Some(values) = packed_varints(data) {
+    let varints = packed_varints(data);
+    // A real varint list has encodings of about one length (packed bools and
+    // enums: all one byte); fixed-width integers parsed as varints come apart
+    // at random continuation bits. Such a list shares high bits when read as
+    // fixed-width integers, so it is no evidence for them.
+    let varint_like = varints.as_ref().is_some_and(|vs| {
+        let len = |v: u64| (64 - v.leading_zeros()).max(1).div_ceil(7);
+        let (lo, hi) = vs.iter().fold((u32::MAX, 0), |(lo, hi), &v| {
+            (lo.min(len(v)), hi.max(len(v)))
+        });
+        hi - lo <= 1
+    });
+    if let Some(values) = varints {
         alts.push(Alt {
             kind: AltKind::PackedVarint(values),
             score: if pr < 0.5 { 0.25 } else { 0.03 },
@@ -360,9 +372,14 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .collect();
         let p = plausible_floats(values.iter().map(|&v| f64::from_bits(v)));
+        let ints = if varint_like {
+            0.0
+        } else {
+            int_column(&values, 64)
+        };
         alts.push(Alt {
             kind: AltKind::PackedFixed64(values),
-            score: fixed_score(0.3, p, pr),
+            score: fixed_score(0.3, p, pr).max(fixed_score(0.6, ints, pr)),
         });
     }
     if data.len().is_multiple_of(4) {
@@ -371,9 +388,15 @@ fn classify_len(buf: &[u8], s: usize, e: usize, depth: usize, opts: &Options) ->
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         let p = plausible_floats(values.iter().map(|&v| f64::from(f32::from_bits(v))));
+        let wide: Vec<u64> = values.iter().map(|&v| u64::from(v)).collect();
+        let ints = if varint_like {
+            0.0
+        } else {
+            int_column(&wide, 32)
+        };
         alts.push(Alt {
             kind: AltKind::PackedFixed32(values),
-            score: fixed_score(0.28, p, pr),
+            score: fixed_score(0.28, p, pr).max(fixed_score(0.56, ints, pr)),
         });
     }
     alts.push(Alt {
@@ -402,6 +425,29 @@ fn plausible_floats(xs: impl Iterator<Item = f64>) -> f64 {
         }
     }
     if n == 0 { 0.0 } else { good as f64 / n as f64 }
+}
+
+/// How much `values` (`width`-bit integers) look like a column of related
+/// numbers (ids from one generator, timestamps, counters): they share their
+/// high bits. Random bytes do so by chance with probability 2^-(bits·(n-1)),
+/// so 24 bits of agreement across the column count as certain. Needs at least
+/// four values, and a constant column is no evidence.
+fn int_column(values: &[u64], width: u32) -> f64 {
+    let Some(&first) = values.first() else {
+        return 0.0;
+    };
+    if values.len() < 4 {
+        return 0.0;
+    }
+    let diff = values.iter().fold(0, |acc, &v| acc | (v ^ first));
+    if diff == 0 {
+        return 0.0;
+    }
+    let shared = diff.leading_zeros() - (64 - width);
+    if shared < 3 {
+        return 0.0;
+    }
+    (f64::from(shared) * (values.len() - 1) as f64 / 24.0).min(1.0)
 }
 
 /// Score of a packed fixed-width reading: `top` × plausibility⁴ when the

@@ -6,6 +6,11 @@ schema, paths and error codes in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Unreleased
 
+- Packed fixed-width integers rank correctly: a protobuf LEN field holding
+  fixed64/fixed32 ids, timestamps or counters (values sharing their high
+  bits) now ranks `packed_fixed64`/`packed_fixed32` first. Before, such
+  fields read as `packed_varint` or `bytes`, and `packed_fixed64` could fall
+  off the default three alts.
 - `--get` walks into JSON text: a decoded text layer (base64 → gzip → JSON),
   a protobuf string field or a CBOR/MessagePack text string that holds a
   JSON object or array takes key and index segments (`users.37.id`). It reads
